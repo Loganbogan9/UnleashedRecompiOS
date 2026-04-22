@@ -63,37 +63,31 @@ jobs:
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install cmake ninja pkg-config
 
-      - name: Validate Private Assets
+      - name: Validate Private File Secrets
         env:
-          ASSET_REPO: ${{ secrets.ASSET_REPO }}
-          ASSET_REPO_TOKEN: ${{ secrets.ASSET_REPO_TOKEN }}
+          PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
+          PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
+          PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
         run: |
           set -euo pipefail
-          if [[ -z "${ASSET_REPO}" || -z "${ASSET_REPO_TOKEN}" ]]; then
-            echo "Missing required secrets ASSET_REPO and ASSET_REPO_TOKEN." >&2
-            exit 1
-          fi
-
-      - name: Checkout Private Asset Repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.ASSET_REPO }}
-          token: ${{ secrets.ASSET_REPO_TOKEN }}
-          path: ./.private-assets
-
-      - name: Verify Private Asset Files
-        run: |
-          set -euo pipefail
-
-          for file in default.xex default.xexp shader.ar; do
-            if [[ ! -f "./.private-assets/${file}" ]]; then
-              echo "Private asset repository is missing ${file}." >&2
+          for name in PRIVATE_DEFAULT_XEX_B64 PRIVATE_DEFAULT_XEXP_B64 PRIVATE_SHADER_AR_B64; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required secret ${name}." >&2
               exit 1
             fi
           done
 
       - name: Stage Private Assets
-        run: cp ./.private-assets/* ./UnleashedRecompLib/private
+        env:
+          PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
+          PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
+          PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./UnleashedRecompLib/private
+          printf '%s' "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
+          printf '%s' "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
+          printf '%s' "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
 
       - name: Prepare Host-Generated Sources
         run: |
