@@ -1,0 +1,85 @@
+name: ios-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Xcode configuration to archive
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
+      ref:
+        description: Optional git ref to build
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ios-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-spirv:
+    name: Generate SPIR-V Headers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: recursive
+
+      - name: Generate SPIR-V Headers
+        shell: pwsh
+        run: ./scripts/ci/generate-spirv-headers.ps1
+
+      - name: Upload SPIR-V Headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: spirv-headers
+          path: ./.artifacts/spirv-headers
+          if-no-files-found: error
+
+  build-ios:
+    name: Build iOS Archive
+    runs-on: macos-26
+    needs: generate-spirv
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: recursive
+
+      - name: Install Build Dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install cmake ninja pkg-config
+
+      - name: Download SPIR-V Headers
+        uses: actions/download-artifact@v4
+        with:
+          name: spirv-headers
+          path: ./.artifacts/spirv-headers
+
+      - name: Stage SPIR-V Headers
+        run: rsync -a ./.artifacts/spirv-headers/ ./
+
+      - name: Build iOS Archive
+        env:
+          IOS_CONFIGURATION: ${{ inputs.configuration }}
+        run: bash ./scripts/ci/build-ios.sh
+
+      - name: Upload iOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ inputs.configuration }}
+          path: ./out/artifacts/ios
+          if-no-files-found: error
