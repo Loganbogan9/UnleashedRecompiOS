@@ -57,14 +57,6 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
 
-      - name: Checkout Private Asset Repository
-        if: ${{ secrets.ASSET_REPO != '' && secrets.ASSET_REPO_TOKEN != '' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.ASSET_REPO }}
-          token: ${{ secrets.ASSET_REPO_TOKEN }}
-          path: ./.private-assets
-
       - name: Install Build Dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -72,12 +64,26 @@ jobs:
         run: brew install cmake ninja pkg-config
 
       - name: Validate Private Assets
+        env:
+          ASSET_REPO: ${{ secrets.ASSET_REPO }}
+          ASSET_REPO_TOKEN: ${{ secrets.ASSET_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ ! -d ./.private-assets ]]; then
+          if [[ -z "${ASSET_REPO}" || -z "${ASSET_REPO_TOKEN}" ]]; then
             echo "Missing required secrets ASSET_REPO and ASSET_REPO_TOKEN." >&2
             exit 1
           fi
+
+      - name: Checkout Private Asset Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.ASSET_REPO }}
+          token: ${{ secrets.ASSET_REPO_TOKEN }}
+          path: ./.private-assets
+
+      - name: Verify Private Asset Files
+        run: |
+          set -euo pipefail
 
           for file in default.xex default.xexp shader.ar; do
             if [[ ! -f "./.private-assets/${file}" ]]; then
