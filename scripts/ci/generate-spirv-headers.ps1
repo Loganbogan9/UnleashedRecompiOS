@@ -35,7 +35,17 @@ function Get-DxcPath {
 
     Expand-Archive -Path $zipPath -DestinationPath $extractPath
 
-    $downloaded = Get-ChildItem -Path $extractPath -Filter dxc.exe -Recurse | Select-Object -First 1
+    $downloaded = Get-ChildItem -Path $extractPath -Filter dxc.exe -Recurse |
+        Sort-Object FullName |
+        Where-Object { $_.FullName -match '[\\/]x64[\\/]' } |
+        Select-Object -First 1
+
+    if (-not $downloaded) {
+        $downloaded = Get-ChildItem -Path $extractPath -Filter dxc.exe -Recurse |
+            Sort-Object FullName |
+            Select-Object -First 1
+    }
+
     if (-not $downloaded) {
         throw "Downloaded DXC archive did not contain dxc.exe"
     }
