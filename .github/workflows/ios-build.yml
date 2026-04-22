@@ -102,7 +102,17 @@ jobs:
         run: |
           set -euo pipefail
           cmake . --preset macos-release -DSDL2MIXER_VORBIS=VORBISFILE
-          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel 3
+          cmake --build ./out/build/macos-release --target XenonRecomp x_decompress XenosRecomp file_to_c --parallel 3
+
+          pushd ./out/build/macos-release/UnleashedRecompLib
+          ../tools/XenonRecomp/XenonRecomp/XenonRecomp 2>&1 | tee "${RUNNER_TEMP}/xenonrecomp.log"
+          ../tools/x_decompress/x_decompress \
+            "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader.ar" \
+            "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader_decompressed.ar"
+          ../tools/XenosRecomp/XenosRecomp/XenosRecomp 2>&1 | tee "${RUNNER_TEMP}/xenosrecomp.log"
+          popd
+
+          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel 3 --verbose
 
       - name: Download SPIR-V Headers
         uses: actions/download-artifact@v4
