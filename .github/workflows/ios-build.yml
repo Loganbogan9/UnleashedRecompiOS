@@ -70,9 +70,14 @@ jobs:
           PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
         run: |
           set -euo pipefail
+          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
+            echo "Using private files already present in the repository checkout."
+            exit 0
+          fi
+
           for name in PRIVATE_DEFAULT_XEX_B64 PRIVATE_DEFAULT_XEXP_B64 PRIVATE_SHADER_AR_B64; do
             if [[ -z "${!name}" ]]; then
-              echo "Missing required secret ${name}." >&2
+              echo "Missing required secret ${name}, and private files are not present in the repository checkout." >&2
               exit 1
             fi
           done
@@ -85,6 +90,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ./UnleashedRecompLib/private
+          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
+            echo "Private files already staged in repository checkout."
+            exit 0
+          fi
           printf '%s' "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
           printf '%s' "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
           printf '%s' "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
