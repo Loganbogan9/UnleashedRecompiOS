@@ -57,11 +57,43 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
 
+      - name: Checkout Private Asset Repository
+        if: ${{ secrets.ASSET_REPO != '' && secrets.ASSET_REPO_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.ASSET_REPO }}
+          token: ${{ secrets.ASSET_REPO_TOKEN }}
+          path: ./.private-assets
+
       - name: Install Build Dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install cmake ninja pkg-config
+
+      - name: Validate Private Assets
+        run: |
+          set -euo pipefail
+          if [[ ! -d ./.private-assets ]]; then
+            echo "Missing required secrets ASSET_REPO and ASSET_REPO_TOKEN." >&2
+            exit 1
+          fi
+
+          for file in default.xex default.xexp shader.ar; do
+            if [[ ! -f "./.private-assets/${file}" ]]; then
+              echo "Private asset repository is missing ${file}." >&2
+              exit 1
+            fi
+          done
+
+      - name: Stage Private Assets
+        run: cp ./.private-assets/* ./UnleashedRecompLib/private
+
+      - name: Prepare Host-Generated Sources
+        run: |
+          set -euo pipefail
+          cmake . --preset macos-release -DSDL2MIXER_VORBIS=VORBISFILE
+          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel 3
 
       - name: Download SPIR-V Headers
         uses: actions/download-artifact@v4
