@@ -28,14 +28,19 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
+
       - name: Generate SPIR-V Headers
         shell: pwsh
-        run: ./scripts/ci/generate-spirv-headers.ps1
+        run: |
+          Set-Location ${{ github.workspace }}
+          ./scripts/ci/generate-spirv-headers.ps1
+
       - name: Upload SPIR-V Headers
         uses: actions/upload-artifact@v4
         with:
           name: spirv-headers
           path: ./.artifacts/spirv-headers
+          if-no-files-found: error
 
   build-ios:
     name: Build iOS (iPad 9 Optimized)
@@ -53,27 +58,25 @@ jobs:
 
       - name: Apply iPad 9 & Controller Patches
         run: |
-          # 1. Enable File Sharing (iTunes/Files App)
-          # Searches for the first <dict> in Info.plist and injects the sharing keys
+          # Enable File Sharing (Files App & iTunes)
           find . -name "Info.plist" -exec sed -i '' '/<dict>/a \
           <key>UIFileSharingEnabled</key><true/>\
           <key>LSSupportsOpeningDocumentsInPlace</key><true/>' {} +
 
-          # 2. Force PS4/MFi Controller Support & Optimization Flags
-          # This injects high-performance flags into the CMake build process
+          # Performance tuning for A13 Bionic (iPad 9)
           export CFLAGS="-O3 -mtune=apple-a13"
           export CXXFLAGS="-O3 -mtune=apple-a13"
 
-      - name: Stage Private Assets
-        env:
-          PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
-          PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
-          PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
+      - name: Verify Local Assets
         run: |
-          mkdir -p ./UnleashedRecompLib/private
-          echo "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
-          echo "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
-          echo "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
+          # Check if your files exist in the private folder
+          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
+            echo "✅ Local game files found in UnleashedRecompLib/private/. Proceeding..."
+          else
+            echo "❌ ERROR: Missing files in UnleashedRecompLib/private/!"
+            ls -R ./UnleashedRecompLib/private/
+            exit 1
+          fi
 
       - name: Prepare Host Tools & Recompile
         run: |
