@@ -3,13 +3,16 @@ on:
   workflow_dispatch:
     inputs:
       configuration:
-        description: Xcode configuration (Use Release for iPad 9 performance)
+        description: Xcode configuration to archive
         required: true
         default: Release
         type: choice
-        options: [Release, RelWithDebInfo, Debug]
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
       ref:
-        description: Git ref to build
+        description: Optional git ref to build
         required: false
         default: ""
         type: string
@@ -28,13 +31,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
-
+          
       - name: Generate SPIR-V Headers
         shell: pwsh
-        run: |
-          Set-Location ${{ github.workspace }}
-          ./scripts/ci/generate-spirv-headers.ps1
-
+        run: ./scripts/ci/generate-spirv-headers.ps1
+        
       - name: Upload SPIR-V Headers
         uses: actions/upload-artifact@v4
         with:
@@ -43,8 +44,8 @@ jobs:
           if-no-files-found: error
 
   build-ios:
-    name: Build iOS (iPad 9 Optimized)
-    runs-on: macos-14
+    name: Build iOS Archive
+    runs-on: macos-latest
     needs: generate-spirv
     steps:
       - name: Checkout Repository
@@ -52,64 +53,99 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
-
-      - name: Install Dependencies
-        run: brew install cmake ninja pkg-config
-
-      - name: Apply iPad 9 & Controller Patches
-        run: |
-          # Enable File Sharing (Files App & iTunes)
-          find . -name "Info.plist" -exec sed -i '' '/<dict>/a \
-          <key>UIFileSharingEnabled</key><true/>\
-          <key>LSSupportsOpeningDocumentsInPlace</key><true/>' {} +
-
-          # Performance tuning for A13 Bionic (iPad 9)
-          export CFLAGS="-O3 -mtune=apple-a13"
-          export CXXFLAGS="-O3 -mtune=apple-a13"
-
-      - name: Verify Local Assets
-        run: |
-          # Check if your files exist in the private folder
-          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
-            echo "✅ Local game files found in UnleashedRecompLib/private/. Proceeding..."
-          else
-            echo "❌ ERROR: Missing files in UnleashedRecompLib/private/!"
-            ls -R ./UnleashedRecompLib/private/
-            exit 1
-          fi
-
-      - name: Prepare Host Tools & Recompile
-        run: |
-          cmake . --preset macos-release -DSDL2MIXER_VORBIS=VORBISFILE
-          cmake --build ./out/build/macos-release --target XenonRecomp x_decompress XenosRecomp file_to_c --parallel $(sysctl -n hw.ncpu)
           
+      - name: Install Build Dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install cmake ninja pkg-config
+        
+      - name: Stage or Verify Private Assets
+        env:
+          PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
+          PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
+          PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./UnleashedRecompLib/private
+          
+          # Check if your manually placed files exist
+          if [[ -f "./UnleashedRecompLib/private/default.xex" && \
+                -f "./UnleashedRecompLib/private/default.xexp" && \
+                -f "./UnleashedRecompLib/private/shader.ar" ]]; then
+            echo "✅ Valid files detected in UnleashedRecompLib/private! Skipping secret extraction."
+          else
+            echo "⚠️ Files not found in directory. Attempting to extract from GitHub Secrets..."
+            
+            for name in PRIVATE_DEFAULT_XEX_B64 PRIVATE_DEFAULT_XEXP_B64 PRIVATE_SHADER_AR_B64; do
+              if [[ -z "${!name}" ]]; then
+                echo "❌ Error: File missing and required secret ${name} is empty." >&2
+                exit 1
+              fi
+            done
+            
+            printf '%s' "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
+            printf '%s' "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
+            printf '%s' "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
+            
+            echo "✅ Successfully extracted base64 assets to UnleashedRecompLib/private."
+          fi
+          
+      - name: Prepare Host-Generated Sources
+        run: |
+          set -euo pipefail
+          cmake . --preset macos-release -DSDL2MIXER_VORBIS=VORBISFILE
+          cmake --build ./out/build/macos-release --target XenonRecomp x_decompress XenosRecomp file_to_c --parallel 3
           pushd ./out/build/macos-release/UnleashedRecompLib
-          ../tools/XenonRecomp/XenonRecomp/XenonRecomp || true
+          ../tools/XenonRecomp/XenonRecomp/XenonRecomp 2>&1 | tee "${RUNNER_TEMP}/xenonrecomp.log"
           ../tools/x_decompress/x_decompress \
             "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader.ar" \
             "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader_decompressed.ar"
-          ../tools/XenosRecomp/XenosRecomp/XenosRecomp || true
+          ../tools/XenosRecomp/XenosRecomp/XenosRecomp 2>&1 | tee "${RUNNER_TEMP}/xenosrecomp.log"
           popd
+          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel 3 --verbose
           
-          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel $(sysctl -n hw.ncpu)
-
       - name: Download SPIR-V Headers
         uses: actions/download-artifact@v4
         with:
           name: spirv-headers
           path: ./.artifacts/spirv-headers
+          
+      - name: Stage SPIR-V Headers
+        run: rsync -a ./.artifacts/spirv-headers/ ./
 
-      - name: Final iOS Build
+      - name: Inject iPad 9 Optimizations & Legacy Control Mappings
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Force Fullscreen on 4:3 iPad Displays
+          find . -name "Info.plist" -exec plutil -replace UIRequiresFullScreen -bool YES {} \;
+          
+          # Inject configurations
+          CONFIG_FILE="./scripts/ci/build-ios.sh"
+          if [ -f "$CONFIG_FILE" ]; then
+            sed -i '' '/^run:/a\
+            export IPAD9_OPTIMIZE=1\
+            export FORCE_FULLSCREEN_4_3=1\
+            export ENABLE_GAMECONTROLLER=1\
+            export MAP_PS4_SQUARE=BOOST\
+            export MAP_PS4_CROSS=JUMP\
+            export MAP_PS4_CIRCLE=SLIDE\
+            export MAP_PS4_L1=QUICK_STEP_LEFT\
+            export MAP_PS4_R1=QUICK_STEP_RIGHT' "$CONFIG_FILE"
+          fi
+
+      - name: Build iOS Archive
         env:
           IOS_CONFIGURATION: ${{ inputs.configuration }}
         run: |
-          rsync -a ./.artifacts/spirv-headers/ ./
-          chmod +x ./scripts/ci/build-ios.sh
-          ./scripts/ci/build-ios.sh
-
-      - name: Upload Finished IPA
+          set -euo pipefail
+          bash ./scripts/ci/build-ios.sh
+        
+      - name: Upload iOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Unleashed-iOS-iPad9-Optimized
+          name: ios-${{ inputs.configuration }}
           path: ./out/artifacts/ios
           if-no-files-found: error
