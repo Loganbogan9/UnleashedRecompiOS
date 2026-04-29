@@ -1,4 +1,44 @@
-name: Upload SPIR-V Headers
+name: ios-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Xcode configuration to archive
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
+      ref:
+        description: Optional git ref to build
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ios-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-spirv:
+    name: Generate SPIR-V Headers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: recursive
+
+      - name: Generate SPIR-V Headers
+        shell: pwsh
+        run: ./scripts/ci/generate-spirv-headers.ps1
+
+      - name: Upload SPIR-V Headers
         uses: actions/upload-artifact@v4
         with:
           name: spirv-headers
@@ -7,22 +47,40 @@ name: Upload SPIR-V Headers
 
   build-ios:
     name: Build iOS Archive
-    runs-on: macos-latest
+    runs-on: macos-26
     needs: generate-spirv
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
-          
+
       - name: Install Build Dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install cmake ninja pkg-config
-        
-      - name: Stage or Verify Private Assets
+
+      - name: Validate Private File Secrets
+        env:
+          PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
+          PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
+          PRIVATE_SHADER_AR_B64: ${{ secrets.PRIVATE_SHADER_AR_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
+            echo "Using private files already present in the repository checkout."
+            exit 0
+          fi
+          for name in PRIVATE_DEFAULT_XEX_B64 PRIVATE_DEFAULT_XEXP_B64 PRIVATE_SHADER_AR_B64; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required secret ${name}, and private files are not present in the repository checkout." >&2
+              exit 1
+            fi
+          done
+      - name: Stage Private Assets
         env:
           PRIVATE_DEFAULT_XEX_B64: ${{ secrets.PRIVATE_DEFAULT_XEX_B64 }}
           PRIVATE_DEFAULT_XEXP_B64: ${{ secrets.PRIVATE_DEFAULT_XEXP_B64 }}
@@ -30,29 +88,13 @@ name: Upload SPIR-V Headers
         run: |
           set -euo pipefail
           mkdir -p ./UnleashedRecompLib/private
-          
-          # Check if your manually placed files exist
-          if [[ -f "./UnleashedRecompLib/private/default.xex" && \
-                -f "./UnleashedRecompLib/private/default.xexp" && \
-                -f "./UnleashedRecompLib/private/shader.ar" ]]; then
-            echo "✅ Valid files detected in UnleashedRecompLib/private! Skipping secret extraction."
-          else
-            echo "⚠️ Files not found in directory. Attempting to extract from GitHub Secrets..."
-            
-            for name in PRIVATE_DEFAULT_XEX_B64 PRIVATE_DEFAULT_XEXP_B64 PRIVATE_SHADER_AR_B64; do
-              if [[ -z "${!name}" ]]; then
-                echo "❌ Error: File missing and required secret ${name} is empty." >&2
-                exit 1
-              fi
-            done
-            
-            printf '%s' "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
-            printf '%s' "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
-            printf '%s' "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
-            
-            echo "✅ Successfully extracted base64 assets to UnleashedRecompLib/private."
+          if [[ -f ./UnleashedRecompLib/private/default.xex && -f ./UnleashedRecompLib/private/default.xexp && -f ./UnleashedRecompLib/private/shader.ar ]]; then
+            echo "Private files already staged in repository checkout."
+            exit 0
           fi
-          
+          printf '%s' "${PRIVATE_DEFAULT_XEX_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xex
+          printf '%s' "${PRIVATE_DEFAULT_XEXP_B64}" | base64 --decode > ./UnleashedRecompLib/private/default.xexp
+          printf '%s' "${PRIVATE_SHADER_AR_B64}" | base64 --decode > ./UnleashedRecompLib/private/shader.ar
       - name: Prepare Host-Generated Sources
         run: |
           set -euo pipefail
@@ -62,3 +104,27 @@ name: Upload SPIR-V Headers
           ../tools/XenonRecomp/XenonRecomp/XenonRecomp 2>&1 | tee "${RUNNER_TEMP}/xenonrecomp.log"
           ../tools/x_decompress/x_decompress \
             "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader.ar" \
+            "${GITHUB_WORKSPACE}/UnleashedRecompLib/private/shader_decompressed.ar"
+          ../tools/XenosRecomp/XenosRecomp/XenosRecomp 2>&1 | tee "${RUNNER_TEMP}/xenosrecomp.log"
+          popd
+          cmake --build ./out/build/macos-release --target UnleashedRecomp --parallel 3 --verbose
+      - name: Download SPIR-V Headers
+        uses: actions/download-artifact@v4
+        with:
+          name: spirv-headers
+          path: ./.artifacts/spirv-headers
+
+      - name: Stage SPIR-V Headers
+        run: rsync -a ./.artifacts/spirv-headers/ ./
+
+      - name: Build iOS Archive
+        env:
+          IOS_CONFIGURATION: ${{ inputs.configuration }}
+        run: bash ./scripts/ci/build-ios.sh
+
+      - name: Upload iOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ inputs.configuration }}
+          path: ./out/artifacts/ios
+          if-no-files-found: error
