@@ -67,7 +67,8 @@ void KiSystemStartup()
 {
     if (g_memory.base == nullptr)
     {
-        LOGN_ERROR("Failed to reserve the 4 GiB guest memory space.");
+        LOGFN_ERROR("Failed to initialize the 4 GiB guest memory space: stage {}, native error {}.",
+            g_memory.initializationFailureStage, g_memory.initializationNativeError);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(), Localise("System_MemoryAllocationFailed").c_str(), GameWindow::s_pWindow);
         std::_Exit(1);
     }

@@ -9,6 +9,10 @@ struct Memory
 {
     uint8_t* base{};
     size_t guardPageSize{};
+    // Initialization runs before logging is available. Retain native failures
+    // so startup can also report them in the persistent application log.
+    const char* initializationFailureStage{ "none" };
+    uint32_t initializationNativeError{};
 
     Memory();
 

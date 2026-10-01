@@ -3,6 +3,7 @@
 #include <kernel/heap.h>
 #include <kernel/function.h>
 #include <csignal>
+#include <cerrno>
 #include <cstdio>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -21,6 +22,8 @@ static void EchoPointer(PPCContext&, uint8_t*) { }
 int main()
 {
     CHECK(g_memory.base != nullptr);
+    CHECK(std::strcmp(g_memory.initializationFailureStage, "none") == 0);
+    CHECK(g_memory.initializationNativeError == 0);
     CHECK(g_memory.MapVirtual(nullptr) == 0);
     CHECK(g_memory.MapVirtual(g_memory.Translate(0x20000)) == 0x20000);
     CHECK(!g_memory.IsInMemoryRange(nullptr));
@@ -90,7 +93,9 @@ int main()
         if (setrlimit(RLIMIT_AS, &limit) != 0)
             std::_Exit(2);
         Memory failure;
-        std::_Exit(failure.base == nullptr ? 0 : 3);
+        std::_Exit(failure.base == nullptr && failure.guardPageSize == 0
+            && std::strcmp(failure.initializationFailureStage, "mmap") == 0
+            && failure.initializationNativeError == ENOMEM ? 0 : 3);
     }
     int status = 0;
     CHECK(waitpid(child, &status, 0) == child);

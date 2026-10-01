@@ -12,7 +12,12 @@ Memory::Memory()
         base = (uint8_t*)VirtualAlloc(nullptr, PPC_MEMORY_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (base == nullptr)
+    {
+        initializationFailureStage = "VirtualAlloc";
+        initializationNativeError = GetLastError();
+        std::fprintf(stderr, "Failed to reserve %llu bytes of guest memory (error %u).\n", static_cast<unsigned long long>(PPC_MEMORY_SIZE), initializationNativeError);
         return;
+    }
 
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
@@ -20,7 +25,9 @@ Memory::Memory()
     DWORD oldProtect;
     if (!VirtualProtect(base, systemInfo.dwPageSize, PAGE_NOACCESS, &oldProtect))
     {
-        std::fprintf(stderr, "Guest memory guard page failed (error %lu).\n", GetLastError());
+        initializationFailureStage = "VirtualProtect";
+        initializationNativeError = GetLastError();
+        std::fprintf(stderr, "Guest memory guard page failed (error %u).\n", initializationNativeError);
         VirtualFree(base, 0, MEM_RELEASE);
         base = nullptr;
         guardPageSize = 0;
@@ -34,17 +41,30 @@ Memory::Memory()
 
     if (base == (uint8_t*)MAP_FAILED)
     {
-        std::fprintf(stderr, "Failed to reserve %llu bytes of guest memory (errno %d).\n", static_cast<unsigned long long>(PPC_MEMORY_SIZE), errno);
+        initializationFailureStage = "mmap";
+        initializationNativeError = static_cast<uint32_t>(errno);
+        std::fprintf(stderr, "Failed to reserve %llu bytes of guest memory (errno %u).\n", static_cast<unsigned long long>(PPC_MEMORY_SIZE), initializationNativeError);
         base = nullptr;
         return;
     }
 
     // Use the host page size explicitly (Apple devices use 16 KiB pages).
+    errno = 0;
     const long pageSize = sysconf(_SC_PAGESIZE);
-    if (pageSize <= 0 || static_cast<size_t>(pageSize) > PPC_MEMORY_SIZE
-        || mprotect(base, static_cast<size_t>(pageSize), PROT_NONE) != 0)
+    if (pageSize <= 0 || static_cast<size_t>(pageSize) > PPC_MEMORY_SIZE)
     {
-        std::fprintf(stderr, "Guest memory guard page failed (page size %ld, errno %d).\n", pageSize, errno);
+        initializationFailureStage = "sysconf(_SC_PAGESIZE)";
+        initializationNativeError = static_cast<uint32_t>(errno);
+        std::fprintf(stderr, "Guest memory page size query failed (page size %ld, errno %u).\n", pageSize, initializationNativeError);
+        munmap(base, PPC_MEMORY_SIZE);
+        base = nullptr;
+        return;
+    }
+    if (mprotect(base, static_cast<size_t>(pageSize), PROT_NONE) != 0)
+    {
+        initializationFailureStage = "mprotect";
+        initializationNativeError = static_cast<uint32_t>(errno);
+        std::fprintf(stderr, "Guest memory guard page failed (page size %ld, errno %u).\n", pageSize, initializationNativeError);
         munmap(base, PPC_MEMORY_SIZE);
         base = nullptr;
         return;
