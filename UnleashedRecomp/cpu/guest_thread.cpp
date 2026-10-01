@@ -5,6 +5,13 @@
 #include <kernel/function.h>
 #include <os/logger.h>
 #include "ppc_context.h"
+#include <new>
+#include <system_error>
+#include <cstring>
+#include <cstdlib>
+#ifdef USE_PTHREAD
+#include <sys/resource.h>
+#endif
 
 constexpr size_t PCR_SIZE = 0xAB0;
 constexpr size_t TLS_SIZE = 0x100;
@@ -19,6 +26,11 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
     assert(thread == nullptr);
 
     thread = (uint8_t*)g_userHeap.Alloc(TOTAL_SIZE);
+    if (thread == nullptr)
+    {
+        LOGFN_ERROR("GuestThreadContext failed to allocate {} bytes for CPU {}.", TOTAL_SIZE, cpuNumber);
+        std::abort();
+    }
     memset(thread, 0, TOTAL_SIZE);
 
     *(uint32_t*)thread = ByteSwap(g_memory.MapVirtual(thread + PCR_SIZE)); // tls pointer
@@ -38,15 +50,29 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
 
 GuestThreadContext::~GuestThreadContext()
 {
+    assert(GetPPCContext() == &ppcContext);
+    g_ppcContext = nullptr;
     g_userHeap.Free(thread);
+}
+
+template <typename ThreadType>
+static uint32_t CalcThreadId(const ThreadType& id)
+{
+    if constexpr (sizeof(id) == 4)
+    {
+        uint32_t value;
+        std::memcpy(&value, &id, sizeof(value));
+        return value;
+    }
+    else
+        return XXH32(&id, sizeof(id), 0);
 }
 
 #ifdef USE_PTHREAD
 static size_t GetStackSize(uint32_t requestedSize)
 {
     // Cache as this should not change.
-    static size_t stackSize = 0;
-    if (stackSize == 0)
+    static const size_t stackSize = []() -> size_t
     {
         // 8 MiB is a typical default.
         constexpr auto defaultSize = 8 * 1024 * 1024;
@@ -55,13 +81,13 @@ static size_t GetStackSize(uint32_t requestedSize)
         if (ret == 0 && lim.rlim_cur < defaultSize)
         {
             // Use what the system allows.
-            stackSize = lim.rlim_cur;
+            return lim.rlim_cur;
         }
         else
         {
-            stackSize = defaultSize;
+            return defaultSize;
         }
-    }
+    }();
 
     size_t targetSize = stackSize;
     if (requestedSize != 0)
@@ -99,61 +125,70 @@ GuestThreadHandle::GuestThreadHandle(const GuestThreadParams& params)
 #ifdef USE_PTHREAD
 {
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, GetStackSize(params.stackSize));
-    const auto ret = pthread_create(&thread, &attr, GuestThreadFunc, this);
-    pthread_attr_destroy(&attr);
-    if (ret != 0) {
-        LOGFN_ERROR("pthread_create failed with error code 0x{:X}.", ret);
+    creationError = pthread_attr_init(&attr);
+    if (creationError != 0)
+    {
+        LOGFN_ERROR("pthread_attr_init failed with error code {}.", creationError);
         return;
     }
 
+    const auto stackSize = GetStackSize(params.stackSize);
+    creationError = pthread_attr_setstacksize(&attr, stackSize);
+    if (creationError != 0)
+    {
+        LOGFN_ERROR("pthread_attr_setstacksize failed with error {}, requested guest stack {}, host stack {}.", creationError, params.stackSize, stackSize);
+        pthread_attr_destroy(&attr);
+        return;
+    }
+    creationError = pthread_create(&thread, &attr, GuestThreadFunc, this);
+    pthread_attr_destroy(&attr);
+    if (creationError != 0) {
+        LOGFN_ERROR("pthread_create failed with error {}, requested guest stack {}, host stack {}.", creationError, params.stackSize, stackSize);
+        return;
+    }
+
+    threadId = CalcThreadId(thread);
     LOGFN("GuestThreadHandle created - function: 0x{:08X}, value: 0x{:08X}, flags: 0x{:08X}, threadId: 0x{:08X}", params.function, params.value, params.flags, GetThreadId());
 }
 #else
       , thread(GuestThreadFunc, this)
 {
+    threadId = CalcThreadId(thread.get_id());
 }
 #endif
 
 GuestThreadHandle::~GuestThreadHandle()
 {
-#ifdef USE_PTHREAD
-    pthread_join(thread, nullptr);
-#else
-    if (thread.joinable())
-        thread.join();
-#endif
-}
-
-template <typename ThreadType>
-static uint32_t CalcThreadId(const ThreadType& id)
-{
-    if constexpr (sizeof(id) == 4)
-        return *reinterpret_cast<const uint32_t*>(&id);
-    else
-        return XXH32(&id, sizeof(id), 0);
+    if (creationError == 0)
+        Wait(INFINITE);
 }
 
 uint32_t GuestThreadHandle::GetThreadId() const
 {
-#ifdef USE_PTHREAD
-    return CalcThreadId(thread);
-#else
-    return CalcThreadId(thread.get_id());
-#endif
+    return threadId;
 }
 
 uint32_t GuestThreadHandle::Wait(uint32_t timeout)
 {
     assert(timeout == INFINITE);
+    std::lock_guard lock(waitMutex);
+    if (creationError != 0)
+        return STATUS_FAIL_CHECK;
+    if (joined)
+        return STATUS_WAIT_0;
 
 #ifdef USE_PTHREAD
-    pthread_join(thread, nullptr);
+    const int error = pthread_join(thread, nullptr);
+    if (error != 0)
+    {
+        LOGFN_ERROR("pthread_join failed with error {} for thread 0x{:08X}.", error, threadId);
+        return STATUS_FAIL_CHECK;
+    }
 #else
     if (thread.joinable())
         thread.join();
 #endif
+    joined = true;
 
     return STATUS_WAIT_0;
 }
@@ -177,7 +212,31 @@ uint32_t GuestThread::Start(const GuestThreadParams& params)
 
 GuestThreadHandle* GuestThread::Start(const GuestThreadParams& params, uint32_t* threadId)
 {
-    auto hThread = CreateKernelObject<GuestThreadHandle>(params);
+    void* storage = g_userHeap.AllocPhysical(sizeof(GuestThreadHandle), alignof(GuestThreadHandle));
+    if (storage == nullptr)
+    {
+        LOGFN_ERROR("Failed to allocate GuestThreadHandle for function 0x{:08X}.", params.function);
+        return nullptr;
+    }
+
+    GuestThreadHandle* hThread;
+    try
+    {
+        hThread = new (storage) GuestThreadHandle(params);
+    }
+    catch (const std::system_error& error)
+    {
+        LOGFN_ERROR("Native thread creation failed for function 0x{:08X}: {}.", params.function, error.what());
+        g_userHeap.Free(storage);
+        return nullptr;
+    }
+
+    if (hThread->creationError != 0)
+    {
+        hThread->~GuestThreadHandle();
+        g_userHeap.Free(storage);
+        return nullptr;
+    }
 
     if (threadId != nullptr)
     {

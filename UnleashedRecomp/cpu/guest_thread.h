@@ -1,6 +1,9 @@
 #pragma once
 
 #include <kernel/xdm.h>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 // Use pthreads directly on macOS to be able to increase default stack size.
 #ifdef __APPLE__
@@ -34,8 +37,12 @@ struct GuestThreadHandle : KernelObject
 {
     GuestThreadParams params;
     std::atomic<bool> suspended;
+    std::mutex waitMutex;
+    uint32_t threadId{};
+    int creationError{};
+    bool joined{};
 #ifdef USE_PTHREAD
-    pthread_t thread;
+    pthread_t thread{};
 #else
     std::thread thread;
 #endif

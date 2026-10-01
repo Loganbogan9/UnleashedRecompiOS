@@ -1419,9 +1419,19 @@ uint32_t ExCreateThread(be<uint32_t>* handle, uint32_t stackSize, be<uint32_t>* 
     LOGF_UTILITY("0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}",
         (intptr_t)handle, stackSize, (intptr_t)threadId, xApiThreadStartup, startAddress, startContext, creationFlags);
 
-    uint32_t hostThreadId;
+    if (handle == nullptr)
+        return 0xC000000D; // STATUS_INVALID_PARAMETER
 
-    *handle = GetKernelHandle(GuestThread::Start({ startAddress, startContext, creationFlags, stackSize }, &hostThreadId));
+    *handle = 0;
+    if (threadId != nullptr)
+        *threadId = 0;
+
+    uint32_t hostThreadId;
+    auto* thread = GuestThread::Start({ startAddress, startContext, creationFlags, stackSize }, &hostThreadId);
+    if (thread == nullptr)
+        return 0xC000009A; // STATUS_INSUFFICIENT_RESOURCES
+
+    *handle = GetKernelHandle(thread);
 
     if (threadId != nullptr)
         *threadId = hostThreadId;
