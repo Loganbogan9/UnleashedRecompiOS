@@ -71,4 +71,3 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
         count.notify_all();
     }
 };
-

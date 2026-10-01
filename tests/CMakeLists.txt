@@ -36,6 +36,9 @@ endif()
 add_test(NAME plume_metal_push_constants
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_plume_metal.py"
         "${CMAKE_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" ${PLUME_TEST_FLAGS})
+add_test(NAME plume_metal_descriptor_traversal
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_metal_descriptor_traversal.py"
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" ${PLUME_TEST_FLAGS})
 add_executable(xex_load_tests xex_load_tests.cpp)
 target_include_directories(xex_load_tests PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp"
     "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
