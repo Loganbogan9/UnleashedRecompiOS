@@ -7,6 +7,7 @@
 #include <os/logger.h>
 #include <user/config.h>
 #include <stdafx.h>
+#include <bit>
 
 struct FileHandle : KernelObject
 {
