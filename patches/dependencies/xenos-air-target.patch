@@ -1,6 +1,6 @@
 --- a/XenosRecomp/air_compiler.cpp
 +++ b/XenosRecomp/air_compiler.cpp
-@@ -1,9 +1,27 @@
+@@ -1,9 +1,21 @@
  #include "air_compiler.h"
  
 +#include <cerrno>
@@ -19,16 +19,10 @@
 +extern char** environ;
 +#endif
 +
-+#ifndef XENOS_RECOMP_AIR_SDK
-+#define XENOS_RECOMP_AIR_SDK "macosx"
-+#endif
-+#ifndef XENOS_RECOMP_AIR_TARGET
-+#define XENOS_RECOMP_AIR_TARGET "air64-apple-macos13.0"
-+#endif
  
  struct TemporaryPath
  {
-@@ -20,14 +38,22 @@
+@@ -20,14 +32,22 @@
  static int executeCommand(const char** argv)
  {
      pid_t pid;
@@ -55,7 +49,7 @@
  }
  
  std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
-@@ -45,16 +71,28 @@
+@@ -45,16 +65,28 @@
      const TemporaryPath irPath(sourcePath.path + ".ir");
      const TemporaryPath metalLibPath(sourcePath.path + ".metallib");
  
@@ -89,7 +83,7 @@
  #ifdef UNLEASHED_RECOMP
          "-DUNLEASHED_RECOMP",
  #endif
-@@ -67,7 +105,7 @@
+@@ -67,7 +99,7 @@
          std::exit(1);
      }
  
@@ -98,7 +92,7 @@
      if (const int linkStatus = executeCommand(linkCommand); linkStatus != 0)
      {
          fmt::println("Metal linker exited with status: {}", linkStatus);
-@@ -77,5 +115,10 @@
+@@ -77,5 +109,10 @@
  
      std::ifstream libStream(metalLibPath.path, std::ios::binary);
      std::vector<uint8_t> data((std::istreambuf_iterator(libStream)), std::istreambuf_iterator<char>());
@@ -124,10 +118,20 @@
          std::vector<uint8_t> dxil;
 --- a/XenosRecomp/air_compiler.h
 +++ b/XenosRecomp/air_compiler.h
-@@ -1,5 +1,6 @@
+@@ -1,7 +1,16 @@
  #pragma once
  
 +#include <cstdint>
  #include <string>
  #include <vector>
++
++#ifndef XENOS_RECOMP_AIR_SDK
++#define XENOS_RECOMP_AIR_SDK "macosx"
++#endif
++#ifndef XENOS_RECOMP_AIR_TARGET
++#define XENOS_RECOMP_AIR_TARGET "air64-apple-macos13.0"
++#endif
++
  
+ class AirCompiler
+ {
