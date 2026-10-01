@@ -14,8 +14,13 @@ std::filesystem::path g_userPath = BuildUserPath();
 
 bool CheckPortable()
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // App bundles and their parent containers are signed and read-only on iOS.
+    return false;
+#else
     std::error_code ec;
     return std::filesystem::exists(g_executableRoot / "portable.txt", ec);
+#endif
 }
 
 std::filesystem::path BuildUserPath()
@@ -34,13 +39,7 @@ std::filesystem::path BuildUserPath()
 #elif defined(__linux__) || defined(__APPLE__)
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     const char* homeDir = getenv("HOME");
-    if (homeDir == nullptr)
-    {
-        if (const passwd* pw = getpwuid(getuid()); pw != nullptr)
-            homeDir = pw->pw_dir;
-    }
-
-    if (homeDir != nullptr)
+    if (homeDir != nullptr && *homeDir != '\0')
     {
         userPath = std::filesystem::path(homeDir) / "Documents" / USER_DIRECTORY;
     }

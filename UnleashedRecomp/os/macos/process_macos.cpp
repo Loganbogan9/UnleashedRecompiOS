@@ -1,4 +1,5 @@
 #include <os/process.h>
+#include <os/logger.h>
 
 #include <CoreFoundation/CFBundle.h>
 #include <dlfcn.h>
@@ -6,6 +7,8 @@
 #include <signal.h>
 #include <sys/param.h>
 #include <unistd.h>
+#include <TargetConditionals.h>
+#include <cerrno>
 
 std::filesystem::path os::process::GetExecutablePath()
 {
@@ -60,6 +63,16 @@ bool os::process::SetWorkingDirectory(const std::filesystem::path& path)
 
 bool os::process::StartProcess(const std::filesystem::path& path, const std::vector<std::string>& args, std::filesystem::path work)
 {
+#if TARGET_OS_IPHONE
+    // Normal iOS apps cannot spawn or replace their process. App::Restart records
+    // an explicit action for the next home-screen launch instead.
+    (void)path;
+    (void)args;
+    (void)work;
+    errno = ENOTSUP;
+    LOGN_ERROR("Starting another process is unsupported on iOS.");
+    return false;
+#else
     pid_t pid = fork();
     if (pid < 0)
         return false;
@@ -83,6 +96,7 @@ bool os::process::StartProcess(const std::filesystem::path& path, const std::vec
     }
 
     return true;
+#endif
 }
 
 void os::process::CheckConsole()

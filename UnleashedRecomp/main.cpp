@@ -17,11 +17,13 @@
 #include <user/paths.h>
 #include <user/persistent_storage_manager.h>
 #include <user/registry.h>
+#include <user/launch_request.h>
 #include <kernel/xdbf.h>
 #include <kernel/xex_load.h>
 #include <install/installer.h>
 #include <install/update_checker.h>
 #include <os/logger.h>
+#include <os/macos/ios_diagnostics.h>
 #include <os/process.h>
 #include <os/registry.h>
 #include <ui/game_window.h>
@@ -71,7 +73,9 @@ void KiSystemStartup()
     }
 
     LOGFN("Guest memory base: {}", static_cast<void*>(g_memory.base));
+    os::logger::LogRuntimeDiagnostics("guest heap initialization begin");
     g_userHeap.Init();
+    os::logger::LogRuntimeDiagnostics("guest heap initialization complete");
 
     const auto gameContent = XamMakeContent(XCONTENTTYPE_RESERVED, "Game");
     const auto updateContent = XamMakeContent(XCONTENTTYPE_RESERVED, "Update");
@@ -195,10 +199,10 @@ int main(int argc, char *argv[])
 
     os::process::CheckConsole();
 
+    os::logger::Init();
+
     if (!os::registry::Init())
         LOGN_WARNING("OS does not support registry.");
-
-    os::logger::Init();
 
     PreloadContext preloadContext;
     preloadContext.PreloadExecutable();
@@ -232,9 +236,24 @@ int main(int argc, char *argv[])
         // Set the current working directory to the executable's path.
         std::error_code ec;
         std::filesystem::current_path(os::process::GetExecutableRoot(), ec);
+        if (ec)
+            LOGFN_WARNING("Failed to set working directory: {}", ec.message());
     }
 
+    os::logger::LogRuntimeDiagnostics("configuration load begin");
     Config::Load();
+    os::logger::LogRuntimeDiagnostics("configuration load complete");
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    std::error_code launchError;
+    const auto nextAction = launch_request::Consume(GetUserPath(), launchError);
+    if (launchError)
+        LOGFN_WARNING("Could not consume next-launch action: {}", launchError.message());
+    forceInstaller = forceInstaller || nextAction == launch_request::Action::Install;
+    forceDLCInstaller = forceDLCInstaller || nextAction == launch_request::Action::InstallDLC;
+    if (nextAction != launch_request::Action::None)
+        LOGN("Applying saved iOS installer action for this launch.");
+#endif
 
     LOGFN("Resolved user path: {}", (const char*)GetUserPath().u8string().c_str());
     LOGFN("Resolved game path: {}", (const char*)GetGamePath().u8string().c_str());
@@ -320,7 +339,9 @@ int main(int argc, char *argv[])
     if (Config::ShowConsole)
         os::process::ShowConsole();
 
+    os::logger::LogRuntimeDiagnostics("host startup begin");
     HostStartup();
+    os::logger::LogRuntimeDiagnostics("host startup complete");
 
     const std::filesystem::path gameRoot = GetGamePath();
     const std::filesystem::path patchedExecutablePath = gameRoot / "patched" / "default.xex";
@@ -348,6 +369,8 @@ int main(int argc, char *argv[])
             std::_Exit(0);
         }
 
+        os::logger::LogRuntimeDiagnostics("installer shutdown complete; graphics device retained");
+
         isGameInstalled = Installer::checkGameInstall(gameRoot, modulePath);
         LOGFN("Post-installer state - gameInstalled: {}, modulePath: {}", isGameInstalled, (const char*)modulePath.u8string().c_str());
         if (!isGameInstalled)
@@ -357,16 +380,22 @@ int main(int argc, char *argv[])
         }
     }
 
+    os::logger::LogRuntimeDiagnostics("mod initialization begin");
     ModLoader::Init();
+    os::logger::LogRuntimeDiagnostics("mod initialization complete");
 
+    os::logger::LogRuntimeDiagnostics("persistent storage load begin");
     if (!PersistentStorageManager::LoadBinary())
         LOGFN_ERROR("Failed to load persistent storage binary... (status code {})", (int)PersistentStorageManager::BinStatus);
+    os::logger::LogRuntimeDiagnostics("persistent storage load complete");
 
     LOGN("Starting guest system initialization.");
     KiSystemStartup();
+    os::logger::LogRuntimeDiagnostics("guest system initialization complete");
 
     LOGFN("Loading module: {}", (const char*)modulePath.u8string().c_str());
     uint32_t entry = LdrLoadModule(modulePath);
+    os::logger::LogRuntimeDiagnostics("module load complete");
     if (entry == 0)
     {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(), "Failed to load game executable (patched/default.xex). Re-run installer and verify game/update files.", GameWindow::s_pWindow);
@@ -383,6 +412,7 @@ int main(int argc, char *argv[])
     }
 
     Video::StartPipelinePrecompilation();
+    os::logger::LogRuntimeDiagnostics("pipeline precompilation launched; entering guest");
 
     LOGFN("Starting guest thread at entry: 0x{:08X}", entry);
     GuestThread::Start({ entry, 0, 0 });
