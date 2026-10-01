@@ -40,6 +40,7 @@ int main()
     g_ppcContext = nullptr;
     const long pageSize = sysconf(_SC_PAGESIZE);
     CHECK(pageSize > 0);
+    CHECK(g_memory.guardPageSize == static_cast<size_t>(pageSize));
     g_memory.base[pageSize] = 1;
 
     g_userHeap.Init();

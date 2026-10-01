@@ -138,7 +138,7 @@ uint32_t LdrLoadModule(const std::filesystem::path &path)
 
     xex_load::Image image;
     std::string_view error;
-    if (!xex_load::Validate(loadResult, PPC_MEMORY_SIZE, image, error))
+    if (!xex_load::Validate(loadResult, PPC_MEMORY_SIZE, image, error, g_memory.guardPageSize))
     {
         LOGFN_ERROR("Invalid module '{}': {}", (const char*)path.u8string().c_str(), error);
         return 0;

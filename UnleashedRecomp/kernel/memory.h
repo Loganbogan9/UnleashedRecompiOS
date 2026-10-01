@@ -8,6 +8,7 @@
 struct Memory
 {
     uint8_t* base{};
+    size_t guardPageSize{};
 
     Memory();
 

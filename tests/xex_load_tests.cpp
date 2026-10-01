@@ -10,7 +10,7 @@ void Write(std::vector<uint8_t>& bytes, size_t offset, const T& value)
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
-std::vector<uint8_t> MakeImage(bool basic = false)
+std::vector<uint8_t> MakeImage(bool basic = false, uint32_t loadAddress = 0x10000)
 {
     std::vector<uint8_t> bytes(0x240 + (basic ? 11 : 32));
     Xex2Header header{};
@@ -20,7 +20,7 @@ std::vector<uint8_t> MakeImage(bool basic = false)
     header.headerCount = 3;
     Write(bytes, 0, header);
     const uint32_t keys[] = { XEX_HEADER_ENTRY_POINT, XEX_HEADER_FILE_FORMAT_INFO, XEX_HEADER_RESOURCE_INFO };
-    const uint32_t values[] = { 0x10000, 0x1d0, 0x210 };
+    const uint32_t values[] = { loadAddress, 0x1d0, 0x210 };
     for (size_t i = 0; i < 3; ++i)
     {
         Xex2OptHeader optional{};
@@ -30,7 +30,7 @@ std::vector<uint8_t> MakeImage(bool basic = false)
     }
     Xex2SecurityInfo security{};
     security.imageSize = 32;
-    security.loadAddress = 0x10000;
+    security.loadAddress = loadAddress;
     Write(bytes, 0x40, security);
     Xex2OptFileFormatInfo format{};
     format.infoSize = basic ? 24 : 8;
@@ -48,17 +48,17 @@ std::vector<uint8_t> MakeImage(bool basic = false)
     }
     Xex2ResourceInfo resource{};
     resource.sizeOfHeader = sizeof(resource);
-    resource.offset = 0x10008;
+    resource.offset = loadAddress + 8;
     resource.sizeOfData = 8;
     Write(bytes, 0x210, resource);
     return bytes;
 }
 
-bool Valid(std::span<const uint8_t> bytes)
+bool Valid(std::span<const uint8_t> bytes, size_t guardPageSize = 1)
 {
     xex_load::Image image;
     std::string_view error;
-    const bool valid = xex_load::Validate(bytes, 0x100000000ull, image, error);
+    const bool valid = xex_load::Validate(bytes, 0x100000000ull, image, error, guardPageSize);
     assert(valid == error.empty());
     if (!valid)
         assert(image.data.empty());
@@ -76,6 +76,12 @@ int main()
         std::vector<uint8_t> unaligned(good.size() + 1);
         std::copy(good.begin(), good.end(), unaligned.begin() + 1);
         assert(Valid(std::span(unaligned).subspan(1)));
+    }
+
+    for (uint32_t guardPageSize : { 4096, 16384 })
+    {
+        assert(Valid(MakeImage(false, guardPageSize), guardPageSize));
+        assert(!Valid(MakeImage(false, guardPageSize - 4), guardPageSize));
     }
 
     const auto rejects = [](size_t offset, uint32_t value, bool basic = false)

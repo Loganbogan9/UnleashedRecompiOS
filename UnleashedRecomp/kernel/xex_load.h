@@ -34,7 +34,8 @@ namespace xex_load
 
     // Validate every source and destination extent before modifying guest memory.
     // The installer produces decrypted, uncompressed or basic-compressed XEX files.
-    inline bool Validate(std::span<const uint8_t> bytes, uint64_t memorySize, Image& result, std::string_view& error)
+    inline bool Validate(std::span<const uint8_t> bytes, uint64_t memorySize, Image& result, std::string_view& error,
+        size_t minimumAddress = 1)
     {
         const auto fail = [&](std::string_view message) { error = message; return false; };
         result = {};
@@ -57,7 +58,7 @@ namespace xex_load
         Image image;
         image.loadAddress = security.loadAddress;
         image.imageSize = security.imageSize;
-        if (image.loadAddress == 0 || image.imageSize == 0 ||
+        if (image.loadAddress == 0 || image.loadAddress < minimumAddress || image.imageSize == 0 ||
             image.loadAddress > memorySize || image.imageSize > memorySize - image.loadAddress)
             return fail("image exceeds guest memory");
 

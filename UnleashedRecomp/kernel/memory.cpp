@@ -16,12 +16,14 @@ Memory::Memory()
 
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
+    guardPageSize = systemInfo.dwPageSize;
     DWORD oldProtect;
     if (!VirtualProtect(base, systemInfo.dwPageSize, PAGE_NOACCESS, &oldProtect))
     {
         std::fprintf(stderr, "Guest memory guard page failed (error %lu).\n", GetLastError());
         VirtualFree(base, 0, MEM_RELEASE);
         base = nullptr;
+        guardPageSize = 0;
         return;
     }
 #else
@@ -47,6 +49,7 @@ Memory::Memory()
         base = nullptr;
         return;
     }
+    guardPageSize = static_cast<size_t>(pageSize);
 #endif
 
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
