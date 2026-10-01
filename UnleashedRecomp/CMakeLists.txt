@@ -52,7 +52,10 @@ function(BIN2C)
         set(BIN2C_ARGS_COMPRESSION_TYPE "none")
     endif()
 
-    if (UNLEASHED_RECOMP_IOS AND EXISTS "${BIN2C_ARGS_DEST_FILE}.c")
+    if (UNLEASHED_RECOMP_IOS)
+        if(NOT EXISTS "${BIN2C_ARGS_DEST_FILE}.c" OR NOT EXISTS "${BIN2C_ARGS_DEST_FILE}.h")
+            message(FATAL_ERROR "Missing generated resource ${BIN2C_ARGS_DEST_FILE}.c/.h. Prepare UnleashedRecompArtifacts on a native host first; see docs/BUILDING.md.")
+        endif()
         set_source_files_properties(${BIN2C_ARGS_DEST_FILE}.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
         target_sources(${BIN2C_ARGS_TARGET_OBJ} PRIVATE ${BIN2C_ARGS_DEST_FILE}.c)
         return()
@@ -199,6 +202,7 @@ set(UNLEASHED_RECOMP_UI_CXX_SOURCES
 
 if (UNLEASHED_RECOMP_IOS)
     list(APPEND UNLEASHED_RECOMP_UI_CXX_SOURCES "ui/ios_file_picker.mm")
+    set_source_files_properties(ui/ios_file_picker.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 set(UNLEASHED_RECOMP_INSTALL_CXX_SOURCES
@@ -299,6 +303,13 @@ if (UNLEASHED_RECOMP_METAL)
     if (UNLEASHED_RECOMP_IOS)
         set(UNLEASHED_RECOMP_APPLE_SDK "iphoneos")
     endif()
+    if (CMAKE_OSX_DEPLOYMENT_TARGET)
+        if (UNLEASHED_RECOMP_IOS)
+            set(UNLEASHED_RECOMP_METAL_TARGET "air64-apple-ios${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        else()
+            set(UNLEASHED_RECOMP_METAL_TARGET "air64-apple-macos${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        endif()
+    endif()
 endif()
 
 GenerateVersionSources(
@@ -342,8 +353,10 @@ elseif (APPLE AND NOT UNLEASHED_RECOMP_IOS)
     # Create version number for app bundle.
     CreateVersionString(
         VERSION_TXT ${VERSION_TXT}
+        OUTPUT_CSV 1
         OUTPUT_VAR MACOS_BUNDLE_VERSION
     )
+    string(REPLACE "," "." MACOS_BUNDLE_VERSION "${MACOS_BUNDLE_VERSION}")
 
     add_executable(UnleashedRecomp MACOSX_BUNDLE
         ${UNLEASHED_RECOMP_CXX_SOURCES}
@@ -390,8 +403,10 @@ elseif (APPLE AND NOT UNLEASHED_RECOMP_IOS)
 elseif (UNLEASHED_RECOMP_IOS)
     CreateVersionString(
         VERSION_TXT ${VERSION_TXT}
+        OUTPUT_CSV 1
         OUTPUT_VAR IOS_BUNDLE_VERSION
     )
+    string(REPLACE "," "." IOS_BUNDLE_VERSION "${IOS_BUNDLE_VERSION}")
 
     add_executable(UnleashedRecomp MACOSX_BUNDLE ${UNLEASHED_RECOMP_CXX_SOURCES})
 
@@ -540,24 +555,19 @@ endif()
 
 target_precompile_headers(UnleashedRecomp PUBLIC ${UNLEASHED_RECOMP_PRECOMPILED_HEADERS})
 
+include("${CMAKE_SOURCE_DIR}/cmake/CompileMetalShader.cmake")
+
 function(compile_shader FILE_PATH TARGET_NAME)
     set(HLSL_FILE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shader/hlsl/${FILE_PATH}.hlsl)
     set(MSL_FILE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shader/msl/${FILE_PATH}.metal)
     cmake_path(GET HLSL_FILE_PATH STEM HLSL_NAME)
     cmake_path(GET MSL_FILE_PATH STEM MSL_NAME)
+    file(GLOB HLSL_INCLUDES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gpu/shader/hlsl/*.hlsli")
+    set(SHADER_COMMON_INCLUDE "${UNLEASHED_RECOMP_TOOLS_ROOT}/XenosRecomp/XenosRecomp/shader_common.h")
+    list(APPEND HLSL_INCLUDES "${SHADER_COMMON_INCLUDE}")
 
     if (UNLEASHED_RECOMP_METAL)
-        add_custom_command(
-                OUTPUT ${MSL_FILE_PATH}.ir
-            COMMAND ${XCRUN_TOOL} -sdk ${UNLEASHED_RECOMP_APPLE_SDK} metal -o ${MSL_FILE_PATH}.ir -c ${MSL_FILE_PATH} -D__air__ -frecord-sources -gline-tables-only
-                DEPENDS ${MSL_FILE_PATH}
-        )
-        add_custom_command(
-                OUTPUT ${MSL_FILE_PATH}.metallib
-            COMMAND ${XCRUN_TOOL} -sdk ${UNLEASHED_RECOMP_APPLE_SDK} metallib -o ${MSL_FILE_PATH}.metallib ${MSL_FILE_PATH}.ir
-                DEPENDS ${MSL_FILE_PATH}.ir
-        )
-        BIN2C(TARGET_OBJ UnleashedRecomp SOURCE_FILE "${MSL_FILE_PATH}.metallib" DEST_FILE "${MSL_FILE_PATH}.metallib" ARRAY_NAME "g_${MSL_NAME}_air")
+        unleashed_compile_metal_shader(UnleashedRecomp "${MSL_FILE_PATH}" "${MSL_NAME}" "${SHADER_COMMON_INCLUDE}")
     endif()
 
     if (UNLEASHED_RECOMP_IOS AND NOT DIRECTX_DXC_TOOL)
@@ -572,14 +582,16 @@ function(compile_shader FILE_PATH TARGET_NAME)
         add_custom_command(
             OUTPUT ${HLSL_FILE_PATH}.dxil.h
             COMMAND ${DIRECTX_DXC_TOOL} -T ${TARGET_NAME} -HV 2021 -all-resources-bound -Wno-ignored-attributes -E shaderMain -Fh ${HLSL_FILE_PATH}.dxil.h ${HLSL_FILE_PATH} -Vn g_${HLSL_NAME}_dxil
-            DEPENDS ${HLSL_FILE_PATH}
+            DEPENDS ${HLSL_FILE_PATH} ${HLSL_INCLUDES}
+            VERBATIM
         )
         target_sources(UnleashedRecomp PRIVATE ${HLSL_FILE_PATH}.dxil.h)
     endif()
     add_custom_command(
         OUTPUT ${HLSL_FILE_PATH}.spirv.h
         COMMAND ${DIRECTX_DXC_TOOL} -T ${TARGET_NAME} -HV 2021 -all-resources-bound -spirv -fvk-use-dx-layout ${ARGN} -E shaderMain -Fh ${HLSL_FILE_PATH}.spirv.h ${HLSL_FILE_PATH} -Vn g_${HLSL_NAME}_spirv
-        DEPENDS ${HLSL_FILE_PATH}
+        DEPENDS ${HLSL_FILE_PATH} ${HLSL_INCLUDES}
+        VERBATIM
     )
     target_sources(UnleashedRecomp PRIVATE ${HLSL_FILE_PATH}.spirv.h)
 endfunction()
@@ -722,3 +734,14 @@ BIN2C(TARGET_OBJ UnleashedRecomp SOURCE_FILE "${RESOURCES_SOURCE_PATH}/sounds/sy
 BIN2C(TARGET_OBJ UnleashedRecomp SOURCE_FILE "${RESOURCES_SOURCE_PATH}/sounds/sys_actstg_pausedecide.ogg" DEST_FILE "${RESOURCES_OUTPUT_PATH}/sounds/sys_actstg_pausedecide.ogg" ARRAY_NAME "g_sys_actstg_pausedecide")
 BIN2C(TARGET_OBJ UnleashedRecomp SOURCE_FILE "${RESOURCES_SOURCE_PATH}/sounds/sys_actstg_pausewinclose.ogg" DEST_FILE "${RESOURCES_OUTPUT_PATH}/sounds/sys_actstg_pausewinclose.ogg" ARRAY_NAME "g_sys_actstg_pausewinclose")
 BIN2C(TARGET_OBJ UnleashedRecomp SOURCE_FILE "${RESOURCES_SOURCE_PATH}/sounds/sys_actstg_pausewinopen.ogg" DEST_FILE "${RESOURCES_OUTPUT_PATH}/sounds/sys_actstg_pausewinopen.ogg" ARRAY_NAME "g_sys_actstg_pausewinopen")
+
+# Generate host-side resources/recompilation without linking a macOS app.
+# This also prepares the shared inputs consumed by the iOS cross-build.
+if (NOT UNLEASHED_RECOMP_IOS)
+    get_target_property(ARTIFACT_SOURCES UnleashedRecomp SOURCES)
+    list(FILTER ARTIFACT_SOURCES INCLUDE REGEX "\\.c$|\\.spirv\\.h$|\\.dxil\\.h$")
+    add_custom_target(UnleashedRecompArtifacts DEPENDS
+        ${ARTIFACT_SOURCES}
+        "${CMAKE_SOURCE_DIR}/UnleashedRecompLib/ppc/ppc_recomp_shared.h"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecompLib/shader/shader_cache.cpp")
+endif()

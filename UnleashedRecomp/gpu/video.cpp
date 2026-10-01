@@ -82,29 +82,29 @@
 #endif
 
 #ifdef UNLEASHED_RECOMP_METAL
-#include "shader/msl/blend_color_alpha_ps.metal.metallib.h"
-#include "shader/msl/copy_vs.metal.metallib.h"
-#include "shader/msl/copy_color_ps.metal.metallib.h"
-#include "shader/msl/copy_depth_ps.metal.metallib.h"
-#include "shader/msl/csd_filter_ps.metal.metallib.h"
-#include "shader/msl/csd_no_tex_vs.metal.metallib.h"
-#include "shader/msl/csd_vs.metal.metallib.h"
-#include "shader/msl/enhanced_motion_blur_ps.metal.metallib.h"
-#include "shader/msl/gamma_correction_ps.metal.metallib.h"
-#include "shader/msl/gaussian_blur_3x3.metal.metallib.h"
-#include "shader/msl/gaussian_blur_5x5.metal.metallib.h"
-#include "shader/msl/gaussian_blur_7x7.metal.metallib.h"
-#include "shader/msl/gaussian_blur_9x9.metal.metallib.h"
-#include "shader/msl/imgui_ps.metal.metallib.h"
-#include "shader/msl/imgui_vs.metal.metallib.h"
-#include "shader/msl/movie_ps.metal.metallib.h"
-#include "shader/msl/movie_vs.metal.metallib.h"
-#include "shader/msl/resolve_msaa_color_2x.metal.metallib.h"
-#include "shader/msl/resolve_msaa_color_4x.metal.metallib.h"
-#include "shader/msl/resolve_msaa_color_8x.metal.metallib.h"
-#include "shader/msl/resolve_msaa_depth_2x.metal.metallib.h"
-#include "shader/msl/resolve_msaa_depth_4x.metal.metallib.h"
-#include "shader/msl/resolve_msaa_depth_8x.metal.metallib.h"
+#include <gpu/shader/msl/blend_color_alpha_ps.metal.metallib.h>
+#include <gpu/shader/msl/copy_vs.metal.metallib.h>
+#include <gpu/shader/msl/copy_color_ps.metal.metallib.h>
+#include <gpu/shader/msl/copy_depth_ps.metal.metallib.h>
+#include <gpu/shader/msl/csd_filter_ps.metal.metallib.h>
+#include <gpu/shader/msl/csd_no_tex_vs.metal.metallib.h>
+#include <gpu/shader/msl/csd_vs.metal.metallib.h>
+#include <gpu/shader/msl/enhanced_motion_blur_ps.metal.metallib.h>
+#include <gpu/shader/msl/gamma_correction_ps.metal.metallib.h>
+#include <gpu/shader/msl/gaussian_blur_3x3.metal.metallib.h>
+#include <gpu/shader/msl/gaussian_blur_5x5.metal.metallib.h>
+#include <gpu/shader/msl/gaussian_blur_7x7.metal.metallib.h>
+#include <gpu/shader/msl/gaussian_blur_9x9.metal.metallib.h>
+#include <gpu/shader/msl/imgui_ps.metal.metallib.h>
+#include <gpu/shader/msl/imgui_vs.metal.metallib.h>
+#include <gpu/shader/msl/movie_ps.metal.metallib.h>
+#include <gpu/shader/msl/movie_vs.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_color_2x.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_color_4x.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_color_8x.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_depth_2x.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_depth_4x.metal.metallib.h>
+#include <gpu/shader/msl/resolve_msaa_depth_8x.metal.metallib.h>
 #endif
 
 #include "shader/hlsl/blend_color_alpha_ps.hlsl.spirv.h"

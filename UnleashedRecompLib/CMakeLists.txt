@@ -48,6 +48,7 @@ if (NOT UNLEASHED_RECOMP_USE_PREGENERATED_RECOMP)
             "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xex"
             "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xexp"
             "${CMAKE_CURRENT_SOURCE_DIR}/config/SWA.toml"
+            XenonRecomp
         USES_TERMINAL
     )
 
@@ -89,8 +90,19 @@ if (NOT UNLEASHED_RECOMP_USE_PREGENERATED_RECOMP)
             "${CMAKE_CURRENT_SOURCE_DIR}/private/shader_decompressed.ar" 
             ${XENOS_RECOMP_SOURCES} 
             ${XENOS_RECOMP_INCLUDE}
+            XenosRecomp
         USES_TERMINAL
     )
+endif()
+
+if (UNLEASHED_RECOMP_USE_PREGENERATED_RECOMP)
+    foreach(input IN LISTS UNLEASHED_RECOMP_PPC_RECOMPILED_SOURCES)
+        if(NOT EXISTS "${input}")
+            message(FATAL_ERROR "Missing generated recompilation input: ${input}. Prepare UnleashedRecompArtifacts on a native host first; see docs/BUILDING.md.")
+        endif()
+    endforeach()
+    include("${CMAKE_SOURCE_DIR}/cmake/ValidateIOSShaderCache.cmake")
+    unleashed_validate_ios_shader_cache("${CMAKE_CURRENT_SOURCE_DIR}/shader/shader_cache.cpp" "${CMAKE_OSX_DEPLOYMENT_TARGET}")
 endif()
 
 add_library(UnleashedRecompLib 

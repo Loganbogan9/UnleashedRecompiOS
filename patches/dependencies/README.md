@@ -51,3 +51,20 @@ Several later upstream changes were deliberately not included:
 Other upstream Vulkan/D3D12/build/example changes were inspected but are not
 required for these iOS fixes. No blanket upstream merge or unpublished submodule
 revision is used.
+
+## XenosRecomp AIR host tools
+
+Base: the fork's `squidbus/XenosRecomp` commit `4906992`, including its MSL
+translator. Canonical `hedge-dev/XenosRecomp` has no missing commits relative to
+this pin at review time. `xenos-air-target.patch` adds a selectable SDK/triple,
+emits cache provenance before the generated arrays, inherits the selected host
+environment for `xcrun`, handles partial/interrupted file writes and `waitpid`,
+and rejects an empty linker result. It preserves the translator's math mode and
+MSL generation semantics. The native host still needs Apple's Metal compiler.
+
+`air_command_generation.cpp` compiles the actual patched compiler for macOS and
+iPhoneOS targets on Linux with subprocess calls wrapped. It verifies selected
+SDK/triple arguments, inherited `DEVELOPER_DIR`, complete source writes after
+EINTR/partial writes and temporary-file cleanup. This checks host command logic;
+it does not compile a Metal library. iOS rejects unidentified, macOS-targeted,
+or too-new game caches and rechecks when the shared cache changes.

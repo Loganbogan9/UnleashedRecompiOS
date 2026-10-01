@@ -149,8 +149,8 @@
                 "CMAKE_SYSTEM_NAME": "iOS",
                 "CMAKE_OSX_SYSROOT": "iphoneos",
                 "CMAKE_OSX_ARCHITECTURES": "arm64",
-                "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0",
-                "VCPKG_OSX_DEPLOYMENT_TARGET": "15.0",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "16.0",
+                "VCPKG_OSX_DEPLOYMENT_TARGET": "16.0",
                 "VCPKG_TARGET_TRIPLET": {
                     "value": "arm64-ios",
                     "type": "STRING"
@@ -238,10 +238,36 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_INTERPROCEDURAL_OPTIMIZATION": false,
-                "CMAKE_C_FLAGS_RELEASE": "-O2 -g",
-                "CMAKE_CXX_FLAGS_RELEASE": "-O2 -g",
+                "CMAKE_C_FLAGS_RELEASE": "-O2 -g -DNDEBUG",
+                "CMAKE_CXX_FLAGS_RELEASE": "-O2 -g -DNDEBUG",
                 "CMAKE_XCODE_ATTRIBUTE_GCC_OPTIMIZATION_LEVEL": "2"
             }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "ios-xcode-debug",
+            "configurePreset": "ios-xcode-debug",
+            "configuration": "Debug",
+            "targets": [
+                "UnleashedRecomp"
+            ]
+        },
+        {
+            "name": "ios-xcode-relwithdebinfo",
+            "configurePreset": "ios-xcode-relwithdebinfo",
+            "configuration": "RelWithDebInfo",
+            "targets": [
+                "UnleashedRecomp"
+            ]
+        },
+        {
+            "name": "ios-xcode-release",
+            "configurePreset": "ios-xcode-release",
+            "configuration": "Release",
+            "targets": [
+                "UnleashedRecomp"
+            ]
         }
     ]
 }

@@ -1,0 +1,21 @@
+function(unleashed_validate_ios_shader_cache path deployment_target)
+    # Generated game shaders are shared with the host build. Recheck if another
+    # build switches their SDK after this iOS build has been configured.
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+    endif()
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "Missing generated shader cache. Prepare UnleashedRecompArtifacts on macOS with -DUNLEASHED_RECOMP_SHADER_TARGET_SDK=iphoneos first.")
+    endif()
+    # Provenance precedes the large arrays; do not read a whole game cache.
+    file(READ "${path}" prefix LIMIT 4096)
+    if(NOT prefix MATCHES "g_airCacheTargetSdk\\[\\] = \"iphoneos\"")
+        message(FATAL_ERROR "iOS requires an iPhoneOS game shader cache with target provenance. Regenerate UnleashedRecompArtifacts on macOS with -DUNLEASHED_RECOMP_SHADER_TARGET_SDK=iphoneos; old/unidentified or macOS shader caches are rejected.")
+    endif()
+    if(NOT prefix MATCHES "g_airCacheTargetTriple\\[\\] = \"air64-apple-ios([0-9.]+)\"")
+        message(FATAL_ERROR "Missing iOS AIR deployment-target provenance in ${path}")
+    endif()
+    if(CMAKE_MATCH_1 VERSION_GREATER deployment_target)
+        message(FATAL_ERROR "Shader cache requires iOS ${CMAKE_MATCH_1}, above app deployment target ${deployment_target}")
+    endif()
+endfunction()

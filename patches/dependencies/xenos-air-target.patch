@@ -1,0 +1,133 @@
+--- a/XenosRecomp/air_compiler.cpp
++++ b/XenosRecomp/air_compiler.cpp
+@@ -1,9 +1,27 @@
+ #include "air_compiler.h"
+ 
++#include <cerrno>
++#include <cstring>
++#include <limits.h>
++#include <sys/wait.h>
++#include <fmt/core.h>
+ #include <fstream>
+ #include <iterator>
+ #include <spawn.h>
+ #include <unistd.h>
++
++#ifdef __APPLE__
++#include <crt_externs.h>
++#else
++extern char** environ;
++#endif
++
++#ifndef XENOS_RECOMP_AIR_SDK
++#define XENOS_RECOMP_AIR_SDK "macosx"
++#endif
++#ifndef XENOS_RECOMP_AIR_TARGET
++#define XENOS_RECOMP_AIR_TARGET "air64-apple-macos13.0"
++#endif
+ 
+ struct TemporaryPath
+ {
+@@ -20,14 +38,22 @@
+ static int executeCommand(const char** argv)
+ {
+     pid_t pid;
+-    if (posix_spawn(&pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), nullptr) != 0)
++#ifdef __APPLE__
++    char** environment = *_NSGetEnviron();
++#else
++    char** environment = environ;
++#endif
++    if (posix_spawn(&pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environment) != 0)
+         return -1;
+ 
+     int status;
+-    if (waitpid(pid, &status, 0) == -1)
+-        return -1;
++    while (waitpid(pid, &status, 0) == -1)
++    {
++        if (errno != EINTR)
++            return -1;
++    }
+ 
+-    return status;
++    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+ }
+ 
+ std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
+@@ -45,16 +71,28 @@
+     const TemporaryPath irPath(sourcePath.path + ".ir");
+     const TemporaryPath metalLibPath(sourcePath.path + ".metallib");
+ 
+-    const ssize_t sourceWritten = write(sourceFd, shaderSource.data(), shaderSource.size());
+-    close(sourceFd);
+-    if (sourceWritten < 0)
++    size_t sourceWritten = 0;
++    while (sourceWritten < shaderSource.size())
+     {
+-        fmt::println("Failed to write shader source to disk: {}", strerror(errno));
++        const ssize_t count = write(sourceFd, shaderSource.data() + sourceWritten, shaderSource.size() - sourceWritten);
++        if (count < 0 && errno == EINTR)
++            continue;
++        if (count <= 0)
++        {
++            fmt::println("Failed to write shader source to disk: {}", strerror(errno));
++            close(sourceFd);
++            std::exit(1);
++        }
++        sourceWritten += size_t(count);
++    }
++    if (close(sourceFd) != 0)
++    {
++        fmt::println("Failed to close shader source: {}", strerror(errno));
+         std::exit(1);
+     }
+ 
+     const char* compileCommand[] = {
+-        "/usr/bin/xcrun", "-sdk", "macosx", "metal", "-o", irPath.path.c_str(), "-c", sourcePath.path.c_str(), "-Wno-unused-variable", "-frecord-sources", "-gline-tables-only", "-fmetal-math-mode=relaxed", "-D__air__",
++        "/usr/bin/xcrun", "-sdk", XENOS_RECOMP_AIR_SDK, "metal", "-target", XENOS_RECOMP_AIR_TARGET, "-o", irPath.path.c_str(), "-c", sourcePath.path.c_str(), "-Wno-unused-variable", "-frecord-sources", "-gline-tables-only", "-fmetal-math-mode=relaxed", "-D__air__",
+ #ifdef UNLEASHED_RECOMP
+         "-DUNLEASHED_RECOMP",
+ #endif
+@@ -67,7 +105,7 @@
+         std::exit(1);
+     }
+ 
+-    const char* linkCommand[] = { "/usr/bin/xcrun", "-sdk", "macosx", "metallib", "-o", metalLibPath.path.c_str(), irPath.path.c_str(), nullptr };
++    const char* linkCommand[] = { "/usr/bin/xcrun", "-sdk", XENOS_RECOMP_AIR_SDK, "metallib", "-o", metalLibPath.path.c_str(), irPath.path.c_str(), nullptr };
+     if (const int linkStatus = executeCommand(linkCommand); linkStatus != 0)
+     {
+         fmt::println("Metal linker exited with status: {}", linkStatus);
+@@ -77,5 +115,10 @@
+ 
+     std::ifstream libStream(metalLibPath.path, std::ios::binary);
+     std::vector<uint8_t> data((std::istreambuf_iterator(libStream)), std::istreambuf_iterator<char>());
++    if (!libStream || data.empty())
++    {
++        fmt::println("Metal linker produced no readable library: {}", metalLibPath.path);
++        std::exit(1);
++    }
+     return data;
+ }
+--- a/XenosRecomp/main.cpp
++++ b/XenosRecomp/main.cpp
+@@ -198,6 +198,10 @@
+ 
+         StringBuffer f;
+         f.println("#include \"shader_cache.h\"");
++#ifdef XENOS_RECOMP_AIR
++        f.println("const char g_airCacheTargetSdk[] = \"{}\";", XENOS_RECOMP_AIR_SDK);
++        f.println("const char g_airCacheTargetTriple[] = \"{}\";", XENOS_RECOMP_AIR_TARGET);
++#endif
+         f.println("ShaderCacheEntry g_shaderCacheEntries[] = {{");
+ 
+         std::vector<uint8_t> dxil;
+--- a/XenosRecomp/air_compiler.h
++++ b/XenosRecomp/air_compiler.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <vector>
+ 

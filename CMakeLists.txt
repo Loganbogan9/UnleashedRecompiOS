@@ -1,5 +1,14 @@
 cmake_minimum_required (VERSION 3.20)
 
+option(UNLEASHED_RECOMP_PORTABLE_TESTS_ONLY "Build portable regression tests without game files or Apple SDKs" OFF)
+if(UNLEASHED_RECOMP_PORTABLE_TESTS_ONLY)
+    project(UnleashedRecompPortableTests LANGUAGES C CXX)
+    set(CMAKE_CXX_STANDARD 20)
+    enable_testing()
+    add_subdirectory(tests)
+    return()
+endif()
+
 if(NOT DEFINED ENV{VCPKG_ROOT})
     if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/vcpkg/scripts/buildsystems/vcpkg.cmake")
         set(ENV{VCPKG_ROOT} "${CMAKE_SOURCE_DIR}/thirdparty/vcpkg")
@@ -44,10 +53,8 @@ if (UNLEASHED_RECOMP_ARCHITECTURE STREQUAL "x86_64" OR UNLEASHED_RECOMP_ARCHITEC
     )
 endif()
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    # Normally only defined by Visual Studio, added for consistency
-    add_compile_definitions(_DEBUG)
-endif()
+# Follow the selected build configuration with Xcode as well as Ninja.
+add_compile_definitions("$<$<CONFIG:Debug>:_DEBUG>")
 
 add_subdirectory(${UNLEASHED_RECOMP_THIRDPARTY_ROOT})
 add_subdirectory(${UNLEASHED_RECOMP_TOOLS_ROOT})
