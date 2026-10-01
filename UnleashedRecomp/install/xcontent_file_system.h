@@ -13,6 +13,7 @@
 
 #include <filesystem>
 #include <map>
+#include <vector>
 
 #include "virtual_file_system.h"
 

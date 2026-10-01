@@ -13,6 +13,7 @@
 
 #include <filesystem>
 #include <map>
+#include <tuple>
 
 #include "virtual_file_system.h"
 

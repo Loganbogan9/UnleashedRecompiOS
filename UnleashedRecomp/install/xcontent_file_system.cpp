@@ -16,6 +16,24 @@
 #include <bit>
 #include <set>
 #include <stack>
+#include <cstring>
+#include <fstream>
+#include <unordered_set>
+
+static bool hasRange(size_t size, size_t offset, size_t length)
+{
+    return offset <= size && length <= size - offset;
+}
+
+template<typename T>
+static T readBigEndian(const void* address)
+{
+    // Packed container metadata is not necessarily aligned for be<T>'s member
+    // functions. Copy into a host-aligned value before converting endianness.
+    T value;
+    std::memcpy(&value, address, sizeof(value));
+    return ByteSwap(value);
+}
 
 enum class XContentPackageType
 {
@@ -215,11 +233,14 @@ size_t blockIndexToHashBlockOffset(uint64_t baseOffset, uint32_t blockIndex)
     return baseOffset + (blockNumber << 12);
 }
 
-const StfsHashEntry *hashEntryFromBlockIndex(const uint8_t *fileData, uint64_t baseOffset, uint64_t blockIndex)
+const StfsHashEntry *hashEntryFromBlockIndex(const uint8_t *fileData, size_t fileSize, uint64_t baseOffset, uint64_t blockIndex)
 {
     size_t hashOffset = blockIndexToHashBlockOffset(baseOffset, blockIndex);
-    const StfsHashTable *hashTable = (const StfsHashTable *)(&fileData[hashOffset]);
-    return &hashTable->entries[blockIndex % StfsBlocksPerHashLevel[0]];
+    const size_t entryOffset = hashOffset + (blockIndex % StfsBlocksPerHashLevel[0]) * sizeof(StfsHashEntry);
+    if (!hasRange(fileSize, entryOffset, sizeof(StfsHashEntry)))
+        return nullptr;
+
+    return reinterpret_cast<const StfsHashEntry*>(&fileData[entryOffset]);
 }
 
 void blockToOffsetAndFile(SvodLayoutType svodLayoutType, size_t svodStartDataBlock, size_t svodBaseOffset, size_t block, size_t &outOffset, size_t &outFileIndex)
@@ -261,6 +282,7 @@ void blockToOffsetAndFile(SvodLayoutType svodLayoutType, size_t svodStartDataBlo
 
 XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
 {
+    decltype(fileMap) parsedFiles;
     mappedFiles.emplace_back();
 
     MemoryMappedFile &rootMappedFile = mappedFiles.back();
@@ -288,7 +310,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
     }
 
     const XContentMetadata &metadata = contentContainerHeader.contentMetadata;
-    volumeType = XContentVolumeType(metadata.volumeType.get());
+    volumeType = XContentVolumeType(readBigEndian<uint32_t>(&metadata.volumeType));
     if (volumeType == XContentVolumeType::STFS)
     {
         const StfsVolumeDescriptor &descriptor = metadata.stfsVolumeDescriptor;
@@ -298,16 +320,18 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
             return;
         }
 
-        baseOffset = ((contentContainerHeader.contentHeader.headerSize + StfsBlockSize - 1) / StfsBlockSize) * StfsBlockSize;
+        baseOffset = ((uint64_t(contentContainerHeader.contentHeader.headerSize) + StfsBlockSize - 1) / StfsBlockSize) * StfsBlockSize;
 
         uint32_t entryCount = 0;
         uint32_t tableBlockIndex = parseUint24(descriptor.fileTableBlockNumberRaw);
         uint32_t tableBlockCount = descriptor.fileTableBlockCount;
         std::map<uint32_t, std::string> directoryNames;
+        std::unordered_set<uint32_t> visitedTableBlocks;
         for (uint32_t i = 0; i < tableBlockCount; i++)
         {
             size_t offset = blockIndexToOffset(baseOffset, tableBlockIndex);
-            if (offset + sizeof(StfsDirectoryBlock) > rootMappedFile.size())
+            if (!hasRange(rootMappedFile.size(), offset, sizeof(StfsDirectoryBlock))
+                || !visitedTableBlocks.insert(tableBlockIndex).second)
             {
                 mappedFiles.clear();
                 return;
@@ -322,7 +346,15 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
                     break;
                 }
 
-                std::string fileNameBase = directoryNames[directoryEntry.directoryIndex];
+                const uint16_t parentIndex = directoryEntry.directoryIndex;
+                if (directoryEntry.flags.nameLength == 0 || directoryEntry.flags.nameLength > sizeof(directoryEntry.name)
+                    || (parentIndex != 0xFFFF && !directoryNames.contains(parentIndex)))
+                {
+                    mappedFiles.clear();
+                    return;
+                }
+
+                std::string fileNameBase = parentIndex == 0xFFFF ? "" : directoryNames.at(parentIndex);
                 std::string fileName(directoryEntry.name, directoryEntry.flags.nameLength & 0x3F);
                 if (directoryEntry.flags.directory)
                 {
@@ -332,11 +364,19 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
 
                 uint32_t fileBlockIndex = parseUint24(directoryEntry.startBlockNumberRaw);
                 uint32_t fileBlockCount = parseUint24(directoryEntry.allocatedDataBlocksRaw);
-                fileMap[fileNameBase + fileName] = { directoryEntry.length, fileBlockIndex, fileBlockCount };
+                parsedFiles[fileNameBase + fileName] = { directoryEntry.length, fileBlockIndex, fileBlockCount };
                 entryCount++;
             }
 
-            const StfsHashEntry *hashEntry = hashEntryFromBlockIndex(rootMappedFileData, baseOffset, tableBlockIndex);
+            if (i + 1 == tableBlockCount)
+                break;
+
+            const StfsHashEntry *hashEntry = hashEntryFromBlockIndex(rootMappedFileData, rootMappedFile.size(), baseOffset, tableBlockIndex);
+            if (hashEntry == nullptr)
+            {
+                mappedFiles.clear();
+                return;
+            }
             tableBlockIndex = hashEntry->infoRaw & 0xFFFFFF;
             if (tableBlockIndex == StfsEndOfChain)
             {
@@ -392,7 +432,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
         if (metadata.svodDeviceDescriptor.features.bits.enhancedGdfLayout)
         {
             size_t EGDFMagicOffset = 0x2000;
-            if (EGDFMagicOffset >= firstMappedFile.size() || std::memcmp(&firstMappedFileData[EGDFMagicOffset], RefMagic, strlen(RefMagic)) != 0)
+            if (!hasRange(firstMappedFile.size(), EGDFMagicOffset, strlen(RefMagic)) || std::memcmp(&firstMappedFileData[EGDFMagicOffset], RefMagic, strlen(RefMagic)) != 0)
             {
                 mappedFiles.clear();
                 return;
@@ -402,7 +442,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
             svodMagicOffset = EGDFMagicOffset;
             svodLayoutType = SvodLayoutType::EnhancedGDF;
         }
-        else if (RefXSFMagicOffset < firstMappedFile.size() && std::memcmp(&firstMappedFileData[RefXSFMagicOffset], RefMagic, strlen(RefMagic)) == 0)
+        else if (hasRange(firstMappedFile.size(), RefXSFMagicOffset, strlen(RefMagic)) && std::memcmp(&firstMappedFileData[RefXSFMagicOffset], RefMagic, strlen(RefMagic)) == 0)
         {
             const char *XSFMagic = "XSF";
             size_t XSFMagicOffset = 0x2000;
@@ -418,7 +458,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
                 svodLayoutType = SvodLayoutType::Unknown;
             }
         }
-        else if (SingleFileMagicOffset < firstMappedFile.size() && std::memcmp(&firstMappedFileData[SingleFileMagicOffset], RefMagic, strlen(RefMagic)) == 0)
+        else if (hasRange(firstMappedFile.size(), SingleFileMagicOffset, strlen(RefMagic)) && std::memcmp(&firstMappedFileData[SingleFileMagicOffset], RefMagic, strlen(RefMagic)) == 0)
         {
             svodBaseOffset = 0xB000;
             svodMagicOffset = 0xD000;
@@ -442,8 +482,15 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
         };
 
         std::stack<IterationStep> iterationStack;
-        uint32_t rootBlock = *(uint32_t *)(&firstMappedFileData[svodMagicOffset + 0x14]);
+        if (!hasRange(firstMappedFile.size(), svodMagicOffset + 0x14, sizeof(uint32_t)))
+        {
+            mappedFiles.clear();
+            return;
+        }
+        uint32_t rootBlock;
+        std::memcpy(&rootBlock, &firstMappedFileData[svodMagicOffset + 0x14], sizeof(rootBlock));
         iterationStack.emplace("", rootBlock, 0);
+        std::set<std::pair<size_t, size_t>> visitedEntries;
 
         IterationStep step;
         size_t fileOffset, fileIndex;
@@ -466,7 +513,8 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
             }
 
             const MemoryMappedFile &mappedFile = mappedFiles[fileIndex];
-            if ((fileOffset + sizeof(SvodDirectoryEntry)) > mappedFile.size())
+            if (!hasRange(mappedFile.size(), fileOffset, sizeof(SvodDirectoryEntry))
+                || !visitedEntries.emplace(fileIndex, fileOffset).second)
             {
                 mappedFiles.clear();
                 return;
@@ -475,7 +523,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
             const uint8_t *mappedFileData = mappedFile.data();
             const SvodDirectoryEntry *directoryEntry = (const SvodDirectoryEntry *)(&mappedFileData[fileOffset]);
             size_t nameOffset = fileOffset + sizeof(SvodDirectoryEntry);
-            if ((nameOffset + directoryEntry->nameLength) > mappedFile.size())
+            if (directoryEntry->nameLength == 0 || !hasRange(mappedFile.size(), nameOffset, directoryEntry->nameLength))
             {
                 mappedFiles.clear();
                 return;
@@ -504,7 +552,7 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
             }
             else
             {
-                fileMap[fileNameUTF8] = { directoryEntry->length, directoryEntry->dataBlock, 0 };
+                parsedFiles[fileNameUTF8] = { directoryEntry->length, directoryEntry->dataBlock, 0 };
             }
         }
     }
@@ -512,6 +560,9 @@ XContentFileSystem::XContentFileSystem(const std::filesystem::path &contentPath)
     {
         mappedFiles.clear();
     }
+
+    if (!mappedFiles.empty())
+        fileMap = std::move(parsedFiles);
 }
 
 bool XContentFileSystem::load(const std::string &path, uint8_t *fileData, size_t fileDataMaxByteCount) const
@@ -524,6 +575,9 @@ bool XContentFileSystem::load(const std::string &path, uint8_t *fileData, size_t
             return false;
         }
 
+        if (mappedFiles.empty() || (fileData == nullptr && it->second.size != 0))
+            return false;
+
         if (volumeType == XContentVolumeType::STFS)
         {
             const MemoryMappedFile &rootMappedFile = mappedFiles.back();
@@ -531,21 +585,27 @@ bool XContentFileSystem::load(const std::string &path, uint8_t *fileData, size_t
             size_t fileDataOffset = 0;
             size_t remainingSize = it->second.size;
             uint32_t fileBlockIndex = it->second.blockIndex;
-            for (uint32_t i = 0; i < it->second.blockCount && fileBlockIndex != StfsEndOfChain; i++)
+            for (uint32_t i = 0; i < it->second.blockCount && fileBlockIndex != StfsEndOfChain && remainingSize > 0; i++)
             {
                 size_t blockSize = std::min(size_t(StfsBlockSize), remainingSize);
                 size_t blockOffset = blockIndexToOffset(baseOffset, fileBlockIndex);
-                if (blockOffset + blockSize > rootMappedFile.size())
+                if (!hasRange(rootMappedFile.size(), blockOffset, blockSize))
                 {
                     return false;
                 }
 
                 memcpy(&fileData[fileDataOffset], &rootMappedFileData[blockOffset], blockSize);
 
-                const StfsHashEntry *hashEntry = hashEntryFromBlockIndex(rootMappedFileData, baseOffset, fileBlockIndex);
-                fileBlockIndex = hashEntry->infoRaw & 0xFFFFFF;
                 fileDataOffset += blockSize;
                 remainingSize -= blockSize;
+                if (remainingSize > 0)
+                {
+                    const StfsHashEntry *hashEntry = hashEntryFromBlockIndex(rootMappedFileData, rootMappedFile.size(), baseOffset, fileBlockIndex);
+                    if (hashEntry == nullptr)
+                        return false;
+
+                    fileBlockIndex = hashEntry->infoRaw & 0xFFFFFF;
+                }
             }
 
             return remainingSize == 0;
@@ -567,7 +627,7 @@ bool XContentFileSystem::load(const std::string &path, uint8_t *fileData, size_t
                 const MemoryMappedFile &mappedFile = mappedFiles[blockFileIndex];
                 const uint8_t *mappedFileData = mappedFile.data();
                 size_t blockSize = std::min(size_t(0x800), remainingSize);
-                if (blockFileOffset + blockSize > mappedFile.size())
+                if (!hasRange(mappedFile.size(), blockFileOffset, blockSize))
                 {
                     return false;
                 }
