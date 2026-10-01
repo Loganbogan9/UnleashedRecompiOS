@@ -202,6 +202,12 @@ int main(int argc, char *argv[])
 
     os::logger::Init();
 
+    // The reservation occurs during static initialization. Record its failure
+    // before renderer/installer startup can obscure a pre-existing VM limit.
+    if (g_memory.base == nullptr)
+        LOGFN_ERROR("Guest memory unavailable at process start: stage {}, native error {}.",
+            g_memory.initializationFailureStage, g_memory.initializationNativeError);
+
     if (!os::registry::Init())
         LOGN_WARNING("OS does not support registry.");
 

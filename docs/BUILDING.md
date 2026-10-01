@@ -152,7 +152,7 @@ python3 tools/check_ios_package.py /path/to/UnleashedRecomp.app
 python3 tools/check_ios_package.py /path/to/UnleashedRecomp.ipa
 ```
 
-The checker validates bundle metadata, executable permissions, device ARM64 Mach-O platform, embedded library references and signature-command extents. It does not verify cryptographic signatures or provisioning. On a Mac, inspect the app's signed entitlements and `embedded.mobileprovision`, and repeat for the final re-signed SideStore app when available. Compare application identifier, Team ID, `get-task-allow`, memory-related entitlements and any embedded frameworks. The project does not add a privileged JIT or increased-memory entitlement.
+The checker validates bundle metadata, executable permissions, device ARM64 Mach-O platform, embedded library references and signature-command extents. It does not verify cryptographic signatures or provisioning. On a Mac, inspect the app's signed entitlements and `embedded.mobileprovision`, and repeat for the final re-signed SideStore app when available. Compare application identifier, Team ID, `get-task-allow`, `com.apple.developer.kernel.extended-virtual-addressing`, `com.apple.developer.kernel.increased-memory-limit`, any development-only memory capability, and any embedded frameworks. The project does not add a privileged JIT or increased-memory entitlement.
 
 5. Launch from the home screen without a debugger as well as through Xcode. Follow [the controlled deployment matrix](IOS_DEPLOYMENT.md) and retain `unleashedrecomp.log`, its `.previous` file, and the matching device crash/watchdog/jetsam report. Installer and DLC actions that request restart now persist a one-shot request and ask for a manual relaunch on iOS.
 

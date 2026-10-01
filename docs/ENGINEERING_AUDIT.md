@@ -68,7 +68,7 @@ It does not mean the complete game was built.
 
 | Change | Evidence and validation |
 | --- | --- |
-| Mapping/heap/null ABI correctness | Check `MAP_FAILED` for both mappings; clean up failed guard protection; validate allocation sizes/alignment; preserve realloc's original allocation on failure; translate guest/host null pointers consistently. Production memory/heap/ABI tests exercise constrained address space and failure paths under ASan/UBSan. |
+| Mapping/heap/null ABI correctness | Check `MAP_FAILED` for both mappings; retain failed API/native error for persistent startup logging; clean up failed guard protection; validate allocation sizes/alignment; preserve realloc's original allocation on failure; translate guest/host null pointers consistently. Production memory/heap/ABI tests exercise constrained address space and failure paths under ASan/UBSan. The application startup logger call is statically reviewed. |
 | XEX validation | Validate headers, optional/resource extents, compression blocks and complete source/destination spans before writing guest memory. Reject overlap with the actual native guard page, including 16 KiB pages. Portable tests cover truncation, overflow, unsupported formats and byte mutations. Actual installed game images still require testing. |
 | Installer container bounds | Reject truncated or cyclic ISO directory trees, STFS table/block chains and SVOD extents; avoid unaligned big-endian metadata access. Production parser tests use synthetic images and both memory-mapped/stream fallback paths under sanitizers. |
 | Guest file I/O | Correct high/low file-size words, report actual bytes written, handle seek failure, and compose 64-bit offsets without signed-overflow errors. Production-source portable tests include sparse large files, partial/error cases and read/write/seek behavior. |
@@ -170,6 +170,9 @@ submission counts, argument-buffer resource declarations, CPU/GPU frame times,
 - Profile pipeline specialization/cache behavior and cap cache growth using real
   stage workloads. Changing shader math/precision without visual baselines is
   inappropriate. Recompile all modified MSL with the actual Apple compiler.
+- Check native DDS array-layer and 3D texture limits in addition to the tested
+  payload/footprint bounds. Profile unconditional render-target shader-write
+  usage and compression eligibility before changing generic resolve access.
 - Finish BC7 support and signed BC4/BC5 handling; verify complete mip chains,
   cube/array/volume fallback behavior and supported GPU format combinations.
   Existing base-mip fallback limitations were not solved by the decoder fix.
@@ -215,9 +218,9 @@ Environment: Linux x86-64; CMake 4.4.3, Ninja, Python 3.14.7, Clang 23.1.1
 and GCC 16.2.1. Final results:
 
 - **20/20 CTest cases passed** with Clang Debug, AddressSanitizer and
-  UndefinedBehaviorSanitizer, with recovery disabled (4.17 seconds).
+  UndefinedBehaviorSanitizer, with recovery disabled (4.02 seconds).
 - **20/20 passed** in a separately configured optimized Clang Release build
-  (3.10 seconds). Test assertions remain enabled with `-UNDEBUG`.
+  (2.77 seconds). Test assertions remain enabled with `-UNDEBUG`.
 - **13/13 independent cases passed** using GCC Release (2.81 seconds): CMake
   embedding/dependencies/metadata/provenance, package fixtures, shader layout,
   BC/DDS helpers, actual C++17 plume methods, bounded logs/relaunch requests and

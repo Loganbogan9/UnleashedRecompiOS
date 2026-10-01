@@ -66,6 +66,21 @@ before concluding that a larger-memory entitlement is necessary. The logged
 and is advisory; see Apple's
 [API documentation](https://developer.apple.com/documentation/os/os_proc_available_memory).
 
+Apple distinguishes [extended virtual addressing](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing)
+from an [increased resident-memory limit](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit).
+Compare both exact entitlement keys in the final Xcode and re-signed profiles.
+Also check for an [Increased Debugging Memory Limit](https://developer.apple.com/help/glossary/increased-debugging-memory-limit/)
+capability used for internal development/testing. None is configured by this
+source change, and none is proven necessary for this app. A failed 4 GiB mapping
+and a jetsam termination after rising footprint are distinct observations.
+
+If a supported signing method cannot provide sufficient virtual address space,
+the current generated `base + guestAddress` ABI still requires a contiguous guest
+window. Avoiding that requirement would need generator/runtime changes to guest
+address translation; it would not be solved by a JIT entitlement. First establish
+an actual mapping failure and compare profiles rather than assuming that this
+architectural work is necessary.
+
 ## Logs and interpretation
 
 Retrieve `unleashedrecomp.log` and `unleashedrecomp.log.previous` from the app's
@@ -80,7 +95,10 @@ installer cleanup, mods, persistent storage, guest-heap initialization, module
 loading and entry into guest execution. Corrupted/truncated XEX headers and
 image extents now produce an `Invalid module` message before guest memory is
 modified. Memory reservation, allocation and thread errors should be correlated
-with these boundaries.
+with these boundaries. Initialization records now retain the original failed API
+and native error code before cleanup can change it; a reservation/protection
+failure is written to the persistent log immediately after logger setup as well
+as at guest initialization.
 
 | Observation | Next evidence to collect |
 | --- | --- |
