@@ -1,5 +1,7 @@
 #include <stdafx.h>
 #include "memory.h"
+#include <cerrno>
+#include <cstdio>
 
 Memory::Memory()
 {
@@ -12,18 +14,39 @@ Memory::Memory()
     if (base == nullptr)
         return;
 
+    SYSTEM_INFO systemInfo;
+    GetSystemInfo(&systemInfo);
     DWORD oldProtect;
-    VirtualProtect(base, 4096, PAGE_NOACCESS, &oldProtect);
+    if (!VirtualProtect(base, systemInfo.dwPageSize, PAGE_NOACCESS, &oldProtect))
+    {
+        std::fprintf(stderr, "Guest memory guard page failed (error %lu).\n", GetLastError());
+        VirtualFree(base, 0, MEM_RELEASE);
+        base = nullptr;
+        return;
+    }
 #else
     base = (uint8_t*)mmap((void*)0x100000000ull, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 
     if (base == (uint8_t*)MAP_FAILED)
         base = (uint8_t*)mmap(NULL, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 
-    if (base == nullptr)
+    if (base == (uint8_t*)MAP_FAILED)
+    {
+        std::fprintf(stderr, "Failed to reserve %llu bytes of guest memory (errno %d).\n", static_cast<unsigned long long>(PPC_MEMORY_SIZE), errno);
+        base = nullptr;
         return;
+    }
 
-    mprotect(base, 4096, PROT_NONE);
+    // Use the host page size explicitly (Apple devices use 16 KiB pages).
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0 || static_cast<size_t>(pageSize) > PPC_MEMORY_SIZE
+        || mprotect(base, static_cast<size_t>(pageSize), PROT_NONE) != 0)
+    {
+        std::fprintf(stderr, "Guest memory guard page failed (page size %ld, errno %d).\n", pageSize, errno);
+        munmap(base, PPC_MEMORY_SIZE);
+        base = nullptr;
+        return;
+    }
 #endif
 
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)

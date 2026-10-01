@@ -5,10 +5,10 @@
 struct Heap
 {
     Mutex mutex;
-    O1HeapInstance* heap;
+    O1HeapInstance* heap{};
 
     Mutex physicalMutex;
-    O1HeapInstance* physicalHeap;
+    O1HeapInstance* physicalHeap{};
 
     void Init();
 

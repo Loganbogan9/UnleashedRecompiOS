@@ -178,11 +178,6 @@ struct ArgTranslator
     constexpr static std::enable_if_t<std::is_pointer_v<T>, void> SetValue(PPCContext& ctx, uint8_t* base, size_t idx, T value) noexcept
     {
         const auto v = g_memory.MapVirtual((void*)value);
-        if (!v)
-        {
-            return;
-        }
-
         SetValue(ctx, base, idx, v);
     }
 };
@@ -332,7 +327,7 @@ T GuestToHostFunction(const TFunction& func, TArgs&&... argv)
 
     if constexpr (std::is_pointer_v<T>)
     {
-        return reinterpret_cast<T>((uint64_t)g_memory.Translate(newCtx.r3.u32));
+        return newCtx.r3.u32 == 0 ? nullptr : reinterpret_cast<T>(g_memory.Translate(newCtx.r3.u32));
     }
     else if constexpr (is_precise_v<T>)
     {
