@@ -12,6 +12,9 @@ add_test(NAME metal_build_dependencies
         "${CMAKE_SOURCE_DIR}" "${CMAKE_COMMAND}" "${CMAKE_C_COMPILER}")
 add_test(NAME ios_package_structure
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ios_package.py" "${CMAKE_SOURCE_DIR}")
+add_test(NAME ios_configuration_metadata
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ios_configuration.py"
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_COMMAND}" "${CMAKE_CXX_COMPILER}")
 add_test(NAME dependency_patch_overlays
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_dependency_overlay.py"
         "${CMAKE_SOURCE_DIR}" "${CMAKE_COMMAND}" "${CMAKE_CURRENT_BINARY_DIR}")
