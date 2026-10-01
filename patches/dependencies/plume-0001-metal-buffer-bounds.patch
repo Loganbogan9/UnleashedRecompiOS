@@ -1,0 +1,59 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+index 16cdf62..dc54782 100644
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -2032,6 +2032,7 @@ namespace plume {
+     }
+ 
+     RenderTexture *MetalSwapChain::getTexture(const uint32_t textureIndex) {
++        assert(textureIndex < drawables.size());
+         return &drawables[textureIndex];
+     }
+ 
+@@ -2402,7 +2403,7 @@ namespace plume {
+ 
+         for (int i = 0; i < textureBarriersCount; i++) {
+             const RenderTextureBarrier &textureBarrier = textureBarriers[i];
+-            MetalTexture *interfaceTexture = static_cast<MetalTexture *>(textureBarrier.texture);
++            ExtendedRenderTexture *interfaceTexture = static_cast<ExtendedRenderTexture *>(textureBarrier.texture);
+ 
+             srcStageMask |= toStageMask(interfaceTexture->barrierStages);
+             interfaceTexture->barrierStages = stages;
+@@ -2554,7 +2555,7 @@ namespace plume {
+         assert(range.binding < MAX_PUSH_CONSTANT_BINDINGS && "Push constants out of range");
+ 
+         pushConstants.resize(activeComputePipelineLayout->pushConstantRanges.size());
+-        pushConstants[rangeIndex].data.resize(range.size);
++        pushConstants[rangeIndex].data.resize(alignUp(range.size));
+         memcpy(pushConstants[rangeIndex].data.data() + offset, data, size == 0 ? range.size : size);
+         pushConstants[rangeIndex].binding = range.binding;
+         pushConstants[rangeIndex].set = range.set;
+@@ -2608,7 +2609,7 @@ namespace plume {
+         assert(range.binding < MAX_PUSH_CONSTANT_BINDINGS && "Push constants out of range");
+ 
+         pushConstants.resize(activeGraphicsPipelineLayout->pushConstantRanges.size());
+-        pushConstants[rangeIndex].data.resize(range.size);
++        pushConstants[rangeIndex].data.resize(alignUp(range.size));
+         memcpy(pushConstants[rangeIndex].data.data() + offset, data, size == 0 ? range.size : size);
+         pushConstants[rangeIndex].binding = range.binding;
+         pushConstants[rangeIndex].set = range.set;
+diff --git a/plume_metal.h b/plume_metal.h
+index 61a721d..cf55279 100644
+--- a/plume_metal.h
++++ b/plume_metal.h
+@@ -201,6 +201,7 @@ namespace plume {
+ 
+     struct ExtendedRenderTexture : RenderTexture {
+         RenderTextureDesc desc;
++        RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+         virtual MTL::Texture* getTexture() const = 0;
+     };
+ 
+@@ -596,7 +597,6 @@ namespace plume {
+         RenderTextureLayout layout = RenderTextureLayout::UNKNOWN;
+         MetalPool *pool = nullptr;
+         MTL::Drawable *drawable = nullptr;
+-        RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+ 
+         MetalTexture() = default;
+         MetalTexture(const MetalDevice *device, MetalPool *pool, const RenderTextureDesc &desc);

@@ -1,0 +1,72 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+index ab6e4aa..9e32346 100644
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -1198,7 +1198,7 @@ namespace plume {
+     }
+ 
+     uint64_t MetalBuffer::getDeviceAddress() const {
+-        assert(device->mtl->supportsFamily(MTL::GPUFamilyMetal3) && "Device address is only supported on Metal3 devices.");
++        assert(device->capabilities.bufferDeviceAddress && "Device address requires Tier 2 argument buffers and iOS 16/macOS 13.");
+         assert((desc.flags & RenderBufferFlag::DEVICE_ADDRESSABLE) != 0 && "Buffer must have been created with GPU_ADDRESSABLE flag.");
+         return mtl->gpuAddress();
+     }
+@@ -3777,12 +3777,25 @@ namespace plume {
+         }
+         devices->release();
+ 
++        NS::OperatingSystemVersion osVersion = NS::ProcessInfo::processInfo()->operatingSystemVersion();
++
+         const std::string deviceName(mtl->name()->utf8String());
+         description.name = deviceName;
++#if PLUME_MACOS && (!defined(MAC_OS_VERSION_27_0) || MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_VERSION_27_0)
+         description.type = mapDeviceType(mtl->location());
++#else
++        // location is a macOS-only API and deprecated starting with macOS 27.
++        description.type = RenderDeviceType::INTEGRATED;
++#endif
+         description.driverVersion = 1; // Unavailable
+         description.vendor = mtl->supportsFamily(MTL::GPUFamilyApple1) ? RenderDeviceVendor::APPLE : getRenderDeviceVendor(mtl->registryID());
++#if PLUME_MACOS
+         description.dedicatedVideoMemory = mtl->recommendedMaxWorkingSetSize();
++#else
++        description.dedicatedVideoMemory = osVersion.majorVersion >= 16
++            ? mtl->recommendedMaxWorkingSetSize()
++            : NS::ProcessInfo::processInfo()->physicalMemory();
++#endif
+ 
+         timestampCounterSet = findTimestampCounterSet();
+         if (timestampCounterSet != nullptr) {
+@@ -3794,8 +3807,6 @@ namespace plume {
+         createResolvePipelineState();
+         sharedBlitDescriptor = MTL::BlitPassDescriptor::alloc()->init();
+ 
+-        NS::OperatingSystemVersion osVersion = NS::ProcessInfo::processInfo()->operatingSystemVersion();
+-
+         // Fill capabilities.
+         // https://developer.apple.com/documentation/metal/device-inspection
+         // TODO: Support Raytracing.
+@@ -3805,7 +3816,7 @@ namespace plume {
+         capabilities.resolveModes = false;
+         capabilities.scalarBlockLayout = true;
+         capabilities.presentWait = true;
+-        capabilities.preferHDR = mtl->recommendedMaxWorkingSetSize() > (512 * 1024 * 1024);
++        capabilities.preferHDR = description.dedicatedVideoMemory > (512 * 1024 * 1024);
+         capabilities.dynamicDepthBias = true;
+         capabilities.uma = mtl->hasUnifiedMemory();
+         capabilities.gpuUploadHeap = capabilities.uma;
+@@ -3815,12 +3826,12 @@ namespace plume {
+ #if PLUME_IOS
+         capabilities.descriptorIndexing = mtl->supportsFamily(MTL::GPUFamilyApple3);
+         capabilities.displayTiming = false;
+-        capabilities.bufferDeviceAddress = osVersion.majorVersion >= 16 && mtl->supportsFamily(MTL::GPUFamilyApple3);
++        capabilities.bufferDeviceAddress = osVersion.majorVersion >= 16 && mtl->argumentBuffersSupport() == MTL::ArgumentBuffersTier2;
+         supportsResidencySets = osVersion.majorVersion >= 18 && mtl->supportsFamily(MTL::GPUFamilyApple6);
+ #else
+         capabilities.descriptorIndexing = true;
+         capabilities.displayTiming = osVersion.majorVersion >= 12;
+-        capabilities.bufferDeviceAddress = osVersion.majorVersion >= 13 && mtl->supportsFamily(MTL::GPUFamilyApple3);
++        capabilities.bufferDeviceAddress = osVersion.majorVersion >= 13 && mtl->argumentBuffersSupport() == MTL::ArgumentBuffersTier2;
+         supportsResidencySets = osVersion.majorVersion >= 15 && mtl->supportsFamily(MTL::GPUFamilyApple6);
+ #endif
+ 

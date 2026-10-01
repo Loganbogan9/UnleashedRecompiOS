@@ -1,0 +1,157 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+index 9e32346..5753fcb 100644
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -1759,9 +1759,11 @@ namespace plume {
+ 
+     void MetalDescriptorSet::commit() {
+         if (needsCommit) {
+-            std::lock_guard lock(residencySetWriteMutex);
+-            residencySet->commit();
+-            needsCommit = false;
++            std::lock_guard lock(descriptorMutex);
++            if (needsCommit) {
++                residencySet->commit();
++                needsCommit = false;
++            }
+         }
+     }
+ 
+@@ -1834,6 +1836,10 @@ namespace plume {
+ 
+     void MetalDescriptorSet::setDescriptor(const uint32_t descriptorIndex, const Descriptor *descriptor) {
+         assert(descriptorIndex < setLayout->descriptorBindingIndices.size());
++        // The set is shared by streaming and render threads. Serializing only
++        // residency updates leaves the argument encoder and resource entries
++        // racing with other writes and encoder resource declarations.
++        std::lock_guard lock(descriptorMutex);
+ 
+         const uint32_t indexBase = setLayout->descriptorIndexBases[descriptorIndex];
+         const uint32_t bindingIndex = setLayout->descriptorBindingIndices[descriptorIndex];
+@@ -1845,7 +1851,6 @@ namespace plume {
+         if (dtype != MTL::DataTypeSampler) {
+             if (resourceEntries[descriptorIndex].resource != nullptr) {
+                 if (residencySet != nullptr) {
+-                    std::lock_guard lock(residencySetWriteMutex);
+                     residencySet->removeAllocation(resourceEntries[descriptorIndex].resource);
+                     needsCommit = true;
+                 }
+@@ -1861,7 +1866,6 @@ namespace plume {
+                     nativeResource = textureDescriptor->texture;
+                     MTL::Texture *nativeTexture = static_cast<MTL::Texture *>(nativeResource);
+                     if (residencySet != nullptr) {
+-                        std::lock_guard lock(residencySetWriteMutex);
+                         residencySet->addAllocation(nativeTexture);
+                         needsCommit = true;
+                     }
+@@ -1874,7 +1878,6 @@ namespace plume {
+                     nativeResource = bufferDescriptor->buffer;
+                     MTL::Buffer *nativeBuffer = static_cast<MTL::Buffer *>(nativeResource);
+                     if (residencySet != nullptr) {
+-                        std::lock_guard lock(residencySetWriteMutex);
+                         residencySet->addAllocation(nativeBuffer);
+                         needsCommit = true;
+                     }
+@@ -1893,6 +1896,26 @@ namespace plume {
+             }
+         }
+ 
++        else {
++            // Retiring a descriptor must clear its encoded handle as well as
++            // release the retained resource; otherwise the argument buffer
++            // still contains an address to a deallocated resource.
++            const uint32_t argumentIndex = descriptorIndex - indexBase + bindingIndex;
++            switch (dtype) {
++                case MTL::DataTypeTexture:
++                    argumentBuffer.argumentEncoder->setTexture(nullptr, argumentIndex);
++                    break;
++                case MTL::DataTypePointer:
++                    argumentBuffer.argumentEncoder->setBuffer(nullptr, 0, argumentIndex);
++                    break;
++                case MTL::DataTypeSampler:
++                    argumentBuffer.argumentEncoder->setSamplerState(nullptr, argumentIndex);
++                    break;
++                default:
++                    assert(false && "Unsupported descriptor type.");
++            }
++        }
++
+         if (argumentBuffer.mtl->storageMode() == MTL::StorageModeManaged) {
+             argumentBuffer.mtl->didModifyRange(NS::Range(argumentBuffer.offset, argumentBuffer.mtl->length() - argumentBuffer.offset));
+         }
+@@ -2306,6 +2329,8 @@ namespace plume {
+         endActiveComputeEncoder();
+ 
+         targetFramebuffer = nullptr;
++        activeRenderState = nullptr;
++        activeComputeState = nullptr;
+ 
+         for (uint32_t i = 0; i < MAX_VERTEX_BUFFER_BINDINGS; i++) {
+             vertexBuffers[i] = nullptr;
+@@ -3576,6 +3601,7 @@ namespace plume {
+             }
+             for (const auto* descriptorSet : currentEncoderDescriptorSets) {
+                 if (descriptorSet->residencySet == nullptr) {
++                    std::lock_guard lock(descriptorSet->descriptorMutex);
+                     for (const auto& entry : descriptorSet->resourceEntries) {
+                         if (entry.resource != nullptr) {
+                             computeEncoder->useResource(entry.resource, mapResourceUsage(entry.type));
+@@ -3593,6 +3619,7 @@ namespace plume {
+             }
+             for (const auto* descriptorSet : currentEncoderDescriptorSets) {
+                 if (descriptorSet->residencySet == nullptr) {
++                    std::lock_guard lock(descriptorSet->descriptorMutex);
+                     for (const auto& entry : descriptorSet->resourceEntries) {
+                         if (entry.resource != nullptr) {
+                             renderEncoder->useResource(entry.resource, mapResourceUsage(entry.type), MTL::RenderStageVertex | MTL::RenderStageFragment);
+@@ -3663,17 +3690,19 @@ namespace plume {
+ 
+         // Create a new command buffer to encode the wait semaphores into
+         MetalAutoreleasePool releasePool;
+-        MTL::CommandBuffer* cmdBuffer = mtl->commandBufferWithUnretainedReferences();
+-        cmdBuffer->setLabel(MTLSTR("Wait Command Buffer"));
+-        cmdBuffer->enqueue();
++        if (waitSemaphoreCount > 0) {
++            MTL::CommandBuffer* cmdBuffer = mtl->commandBufferWithUnretainedReferences();
++            cmdBuffer->setLabel(MTLSTR("Wait Command Buffer"));
++            cmdBuffer->enqueue();
++
++            for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
++                MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(waitSemaphores[i]);
++                cmdBuffer->encodeWait(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue++);
++            }
+ 
+-        for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
+-            MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(waitSemaphores[i]);
+-            cmdBuffer->encodeWait(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue++);
++            cmdBuffer->commit();
+         }
+ 
+-        cmdBuffer->commit();
+-
+         // Commit all command lists except the last one
+ 
+         for (uint32_t i = 0; i < commandListCount - 1; i++) {
+diff --git a/plume_metal.h b/plume_metal.h
+index 5950682..ff8c72b 100644
+--- a/plume_metal.h
++++ b/plume_metal.h
+@@ -7,6 +7,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <set>
+ #include <unordered_set>
+ 
+@@ -215,8 +216,8 @@ namespace plume {
+         MetalArgumentBuffer argumentBuffer;
+         std::vector<ResourceEntry> resourceEntries;
+         MTL::ResidencySet* residencySet = nullptr;
+-        std::mutex residencySetWriteMutex;
+-        bool needsCommit = false;
++        mutable std::mutex descriptorMutex;
++        std::atomic<bool> needsCommit = false;
+ 
+         MetalDescriptorSet(MetalDevice *device, const RenderDescriptorSetDesc &desc);
+         MetalDescriptorSet(MetalDevice *device, uint32_t entryCount);
