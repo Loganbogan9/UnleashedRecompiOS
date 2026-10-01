@@ -5,9 +5,13 @@
 #endif
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
+#if !__has_feature(objc_arc)
+#error "ios_file_picker.mm requires ARC to retain document-picker results across threads."
+#endif
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #include <atomic>
+#include <os/logger.h>
 
 @interface RecompDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
 @property (nonatomic, copy) void (^completion)(NSArray<NSURL*>* urls, NSError* error, BOOL cancelled);
@@ -63,6 +67,7 @@ namespace ios_file_picker
 {
     static std::atomic<bool> s_pickerInFlight = false;
     static NSMutableArray<NSURL*>* s_activeScopedURLs = nil;
+    static char s_pickerDelegateKey;
 
     static void ClearActiveScopedURLs()
     {
@@ -110,6 +115,12 @@ namespace ios_file_picker
                 outError = "A file picker request is already active.";
                 return false;
             }
+            struct RequestGuard
+            {
+                ~RequestGuard() { s_pickerInFlight.store(false); }
+            } requestGuard;
+
+            LOGFN("iOS document picker opened (folderMode={})", folderMode);
 
             __block BOOL finished = NO;
             __block BOOL cancelled = NO;
@@ -152,7 +163,7 @@ namespace ios_file_picker
                 };
 
                 picker.delegate = delegate;
-                objc_setAssociatedObject(picker, @selector(PickPaths), delegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(picker, &s_pickerDelegateKey, delegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 [presenter presentViewController:picker animated:YES completion:nil];
             };
 
@@ -173,20 +184,19 @@ namespace ios_file_picker
             if (pickerError != nil)
             {
                 outError = [[pickerError localizedDescription] UTF8String];
-                s_pickerInFlight.store(false);
+                LOGFN_ERROR("iOS document picker failed: {}", outError);
                 return false;
             }
 
             if (cancelled)
             {
-                s_pickerInFlight.store(false);
+                LOGN("iOS document picker cancelled.");
                 return true;
             }
 
             if (selectedURLs != nil && ![selectedURLs isKindOfClass:[NSArray class]])
             {
                 outError = "Document picker returned invalid selection data.";
-                s_pickerInFlight.store(false);
                 return false;
             }
 
@@ -201,8 +211,9 @@ namespace ios_file_picker
                 if (url == nil)
                     continue;
 
-                BOOL startedScopedAccess = [url startAccessingSecurityScopedResource];
-                if (startedScopedAccess && !IsTrackingScopedURL(url))
+                // Re-selecting a URL must not acquire another scope that shutdown
+                // would only release once. Keep exactly one acquisition per URL.
+                if (!IsTrackingScopedURL(url) && [url startAccessingSecurityScopedResource])
                     [s_activeScopedURLs addObject:url];
 
                 NSURL* fileURL = url;
@@ -234,24 +245,21 @@ namespace ios_file_picker
             if (!foundValidPath && selectedURLArray.count > 0)
             {
                 outError = "Document picker returned items without usable local file paths. Try selecting a local file under 'On My iPhone' and ensure the file is fully downloaded.";
-                s_pickerInFlight.store(false);
                 return false;
             }
 
             if (!foundValidPath && selectedURLArray.count == 0)
             {
-                s_pickerInFlight.store(false);
                 return true;
             }
 
             if (outPaths.empty())
             {
                 outError = "No readable file paths were returned by the picker.";
-                s_pickerInFlight.store(false);
                 return false;
             }
 
-            s_pickerInFlight.store(false);
+            LOGFN("iOS document picker completed with {} usable paths ({} active scopes)", outPaths.size(), s_activeScopedURLs.count);
             return true;
         }
     }
@@ -260,6 +268,7 @@ namespace ios_file_picker
     {
         @autoreleasepool
         {
+            LOGFN("Releasing {} iOS document-picker scopes.", s_activeScopedURLs.count);
             ClearActiveScopedURLs();
         }
     }
