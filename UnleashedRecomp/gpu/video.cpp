@@ -2,6 +2,7 @@
 #include "bc_decoder.h"
 #include "dds_header.h"
 #include "dds_upload.h"
+#include "os/macos/ios_diagnostics.h"
 
 #include <climits>
 
@@ -428,6 +429,15 @@ static std::unique_ptr<RenderTextureView> g_blankTextureViews[TEXTURE_DESCRIPTOR
 
 static TextureDescriptorAllocator g_textureDescriptorAllocator;
 
+static void FreeTextureDescriptor(uint32_t descriptorIndex)
+{
+    // Uninitialized resources and the shared null textures do not own a slot.
+    if (descriptorIndex < TEXTURE_DESCRIPTOR_NULL_COUNT)
+        return;
+    g_textureDescriptorSet->setTexture(descriptorIndex, nullptr, RenderTextureLayout::UNKNOWN);
+    g_textureDescriptorAllocator.free(descriptorIndex);
+}
+
 static std::unique_ptr<RenderPipelineLayout> g_pipelineLayout;
 static xxHashMap<std::unique_ptr<RenderPipeline>> g_pipelines;
 
@@ -657,6 +667,7 @@ static IntermediaryUploadAllocator g_intermediaryUploadAllocator;
 
 static std::vector<GuestResource*> g_tempResources[NUM_FRAMES];
 static std::vector<std::unique_ptr<RenderBuffer>> g_tempBuffers[NUM_FRAMES];
+static std::vector<std::unique_ptr<RenderPipeline>> g_tempPipelines[NUM_FRAMES];
 
 template<GuestPrimitiveType PrimitiveType>
 struct PrimitiveIndexData
@@ -759,13 +770,17 @@ static void DestructTempResources()
             if (texture->mappedMemory != nullptr)
                 g_userHeap.Free(texture->mappedMemory);
 
-            g_textureDescriptorAllocator.free(texture->descriptorIndex);
+            FreeTextureDescriptor(texture->descriptorIndex);
 
             if (texture->patchedTexture != nullptr)
-                g_textureDescriptorAllocator.free(texture->patchedTexture->descriptorIndex); 
+            {
+                FreeTextureDescriptor(texture->patchedTexture->descriptorIndex);
+            }
             
             if (texture->recreatedCubeMapTexture != nullptr)
-                g_textureDescriptorAllocator.free(texture->recreatedCubeMapTexture->descriptorIndex);
+            {
+                FreeTextureDescriptor(texture->recreatedCubeMapTexture->descriptorIndex);
+            }
 
             texture->~GuestTexture();
             break;
@@ -788,8 +803,7 @@ static void DestructTempResources()
         {
             const auto surface = reinterpret_cast<GuestSurface*>(resource);
 
-            if (surface->descriptorIndex != NULL)
-                g_textureDescriptorAllocator.free(surface->descriptorIndex);
+            FreeTextureDescriptor(surface->descriptorIndex);
 
             surface->~GuestSurface();
             break;
@@ -812,6 +826,7 @@ static void DestructTempResources()
 
     g_tempResources[g_frame].clear();
     g_tempBuffers[g_frame].clear();
+    g_tempPipelines[g_frame].clear();
 }
 
 static std::thread::id g_presentThreadId = std::this_thread::get_id();
@@ -1854,6 +1869,16 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
             g_device = g_interface->createDevice(Config::GraphicsDevice);
             if (g_device != nullptr)
             {
+#ifdef UNLEASHED_RECOMP_METAL
+                if (interfaceFunction == CreateMetalInterface && !g_device->getCapabilities().bufferDeviceAddress)
+                {
+                    LOGF_ERROR("Metal device '{}' cannot run the generated shaders: GPU addresses require Tier 2 argument buffers and iOS 16/macOS 13 or later.",
+                        g_device->getDescription().name);
+                    g_device.reset();
+                    g_interface.reset();
+                    continue;
+                }
+#endif
                 const RenderDeviceDescription &deviceDescription = g_device->getDescription();
                 
 #if defined(UNLEASHED_RECOMP_D3D12)
@@ -3258,7 +3283,17 @@ static void ProcTrimRuntimeCaches(const RenderCommand&)
 {
     const size_t pipelinesBefore = g_pipelines.size();
 
+    // The current frame may already reference these pipelines. Metal command
+    // buffers use unretained references, and Vulkan also requires pipeline
+    // lifetime to cover submitted commands. Retire through the same frame
+    // fence mechanism as textures and buffers instead of freeing them here.
+    auto& retiredPipelines = g_tempPipelines[g_frame];
+    retiredPipelines.reserve(retiredPipelines.size() + pipelinesBefore);
+    for (auto& [hash, pipeline] : g_pipelines)
+        retiredPipelines.emplace_back(std::move(pipeline));
+
     g_pipelines.clear();
+    g_dirtyStates.pipelineState = true;
 
 #ifdef PSO_CACHING
     {
@@ -7521,6 +7556,16 @@ PPC_FUNC(sub_825369A0)
     assert(std::this_thread::get_id() == g_mainThreadId);
 
     // Wait for pipeline compilations to finish.
+#if defined(__APPLE__) && TARGET_OS_IOS
+    const auto waitStart = std::chrono::steady_clock::now();
+    auto nextWaitLog = waitStart + std::chrono::seconds(5);
+    const uint32_t initialPendingCount = g_compilingPipelineTaskCount.load();
+    if (initialPendingCount != 0)
+    {
+        LOGFN("Pipeline loading wait started - remainingTasks: {}", initialPendingCount);
+        os::logger::LogRuntimeDiagnostics("Pipeline loading wait started");
+    }
+#endif
     uint32_t value;
     while ((value = g_compilingPipelineTaskCount.load()) != 0)
     {
@@ -7529,8 +7574,32 @@ PPC_FUNC(sub_825369A0)
         SDL_PumpEvents();
         SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
 
+#if defined(__APPLE__) && TARGET_OS_IOS
+        // atomic::wait has no timeout and the task counter only notifies when
+        // it reaches zero. Keep returning to UIKit while Metal compiles a
+        // large stage; Xcode's debugger can mask the normal iOS watchdog.
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextWaitLog)
+        {
+            LOGFN("Pipeline loading wait - elapsedMs: {}, remainingTasks: {}",
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - waitStart).count(), value);
+            os::logger::LogRuntimeDiagnostics("Pipeline loading wait pending");
+            nextWaitLog = now + std::chrono::seconds(5);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+#else
         g_compilingPipelineTaskCount.wait(value);
+#endif
     }
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+    if (initialPendingCount != 0)
+    {
+        LOGFN("Pipeline loading wait completed - elapsedMs: {}, initialTasks: {}",
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count(), initialPendingCount);
+        os::logger::LogRuntimeDiagnostics("Pipeline loading wait completed");
+    }
+#endif
 
     __imp__sub_825369A0(ctx, base);
 
