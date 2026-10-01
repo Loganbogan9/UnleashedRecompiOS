@@ -6124,6 +6124,13 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
     ddspp::Descriptor ddsDesc;
     if (DecodeDdsHeader(data, dataSize, ddsDesc))
     {
+        const uint32_t maxTextureSize = g_device->getCapabilities().maxTextureSize;
+        if (ddsDesc.width > maxTextureSize || ddsDesc.height > maxTextureSize || ddsDesc.depth > maxTextureSize)
+        {
+            LOGF_WARNING("Rejecting DDS texture '{}' with dimensions {}x{}x{} exceeding device limit {}.",
+                sourceName, ddsDesc.width, ddsDesc.height, ddsDesc.depth, maxTextureSize);
+            return false;
+        }
         DdsUploadLayout uploadLayout;
         if (!BuildDdsUploadLayout(ddsDesc, dataSize, PITCH_ALIGNMENT, PLACEMENT_ALIGNMENT, uploadLayout))
         {
@@ -6169,6 +6176,10 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
 
             if (decoded)
             {
+                uint32_t rowPitch;
+                size_t slicePitch;
+                if (!BuildRgba8UploadFootprint(desc.width, desc.height, PITCH_ALIGNMENT, rowPitch, slicePitch))
+                    return false;
                 const RenderFormat decodedFormat = ddsDesc.srgb ? RenderFormat::R8G8B8A8_UNORM_SRGB : RenderFormat::R8G8B8A8_UNORM;
                 texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(desc.width, desc.height, 1, decodedFormat));
                 texture.texture = texture.textureHolder.get();
@@ -6185,9 +6196,6 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
 
                 texture.descriptorIndex = g_textureDescriptorAllocator.allocate();
                 g_textureDescriptorSet->setTexture(texture.descriptorIndex, texture.texture, RenderTextureLayout::SHADER_READ, texture.textureView.get());
-
-                uint32_t rowPitch = (desc.width * 4 + PITCH_ALIGNMENT - 1) & ~(PITCH_ALIGNMENT - 1);
-                uint32_t slicePitch = rowPitch * desc.height;
 
                 auto uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(slicePitch));
                 uint8_t* mappedMemory = reinterpret_cast<uint8_t*>(uploadBuffer->map());
@@ -6359,6 +6367,15 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
 
         if (stbImage != nullptr)
         {
+            uint32_t rowPitch;
+            size_t slicePitch;
+            const uint32_t maxTextureSize = g_device->getCapabilities().maxTextureSize;
+            if (width <= 0 || height <= 0 || uint32_t(width) > maxTextureSize || uint32_t(height) > maxTextureSize ||
+                !BuildRgba8UploadFootprint(width, height, PITCH_ALIGNMENT, rowPitch, slicePitch))
+            {
+                stbi_image_free(stbImage);
+                return false;
+            }
             texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, RenderFormat::R8G8B8A8_UNORM));
             texture.texture = texture.textureHolder.get();
             texture.viewDimension = RenderTextureViewDimension::TEXTURE_2D;
@@ -6366,9 +6383,6 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
 
             texture.descriptorIndex = g_textureDescriptorAllocator.allocate();
             g_textureDescriptorSet->setTexture(texture.descriptorIndex, texture.texture, RenderTextureLayout::SHADER_READ);
-
-            uint32_t rowPitch = (width * 4 + PITCH_ALIGNMENT - 1) & ~(PITCH_ALIGNMENT - 1);
-            uint32_t slicePitch = rowPitch * height;
 
             auto uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(slicePitch));
             uint8_t* mappedMemory = reinterpret_cast<uint8_t*>(uploadBuffer->map());

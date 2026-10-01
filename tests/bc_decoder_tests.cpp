@@ -116,6 +116,23 @@ int main()
         assert(!BuildDdsUploadLayout(descriptor, descriptor.headerSize + size, 256, 512, layout));
     descriptor.arraySize = UINT32_MAX;
     assert(!BuildDdsUploadLayout(descriptor, SIZE_MAX, 256, 512, layout));
+
+    uint32_t rgbaPitch;
+    size_t rgbaSize;
+    assert(BuildRgba8UploadFootprint(1, 1, 256, rgbaPitch, rgbaSize));
+    assert(rgbaPitch == 256 && rgbaSize == 256);
+    assert(BuildRgba8UploadFootprint(16384, 16384, 256, rgbaPitch, rgbaSize));
+    assert(rgbaPitch == 65536 && rgbaSize == 1024 * 1024 * 1024);
+    if constexpr (sizeof(size_t) >= 8)
+    {
+        // This previously wrapped a 32-bit upload size to zero. The caller
+        // rejects dimensions beyond its GPU limit, and planning remains safe.
+        assert(BuildRgba8UploadFootprint(1, 16777216, 256, rgbaPitch, rgbaSize));
+        assert(rgbaSize == uint64_t(1) << 32);
+    }
+    assert(!BuildRgba8UploadFootprint(UINT32_MAX, 1, 256, rgbaPitch, rgbaSize));
+    assert(!BuildRgba8UploadFootprint(1, 0, 256, rgbaPitch, rgbaSize));
+    assert(!BuildRgba8UploadFootprint(1, 1, 3, rgbaPitch, rgbaSize));
     descriptor.arraySize = 1;
     descriptor.numMips = 33;
     assert(!BuildDdsUploadLayout(descriptor, SIZE_MAX, 256, 512, layout));

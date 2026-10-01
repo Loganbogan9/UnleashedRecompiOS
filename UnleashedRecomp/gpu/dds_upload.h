@@ -22,6 +22,19 @@ struct DdsUploadLayout
     size_t uploadSize = 0;
 };
 
+inline bool BuildRgba8UploadFootprint(uint32_t width, uint32_t height, uint32_t pitchAlignment,
+    uint32_t& rowPitch, size_t& uploadSize)
+{
+    if (width == 0 || height == 0 || !std::has_single_bit(pitchAlignment))
+        return false;
+    const uint64_t pitch = (uint64_t(width) * 4 + pitchAlignment - 1) & ~uint64_t(pitchAlignment - 1);
+    if (pitch > UINT32_MAX || pitch > std::numeric_limits<size_t>::max() / height)
+        return false;
+    rowPitch = uint32_t(pitch);
+    uploadSize = size_t(pitch) * height;
+    return true;
+}
+
 // Plan the existing tightly packed DDS -> aligned upload-buffer copy before
 // allocating GPU resources. All mip/array payload and footprint arithmetic
 // must fit; malformed headers must never cause an out-of-bounds memcpy.
