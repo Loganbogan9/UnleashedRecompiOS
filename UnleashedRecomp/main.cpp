@@ -18,6 +18,7 @@
 #include <user/persistent_storage_manager.h>
 #include <user/registry.h>
 #include <kernel/xdbf.h>
+#include <kernel/xex_load.h>
 #include <install/installer.h>
 #include <install/update_checker.h>
 #include <os/logger.h>
@@ -131,45 +132,36 @@ uint32_t LdrLoadModule(const std::filesystem::path &path)
         return 0;
     }
 
-    auto* header = reinterpret_cast<const Xex2Header*>(loadResult.data());
-    auto* security = reinterpret_cast<const Xex2SecurityInfo*>(loadResult.data() + header->securityOffset);
-    const auto* fileFormatInfo = reinterpret_cast<const Xex2OptFileFormatInfo*>(getOptHeaderPtr(loadResult.data(), XEX_HEADER_FILE_FORMAT_INFO));
-    auto entry = *reinterpret_cast<const uint32_t*>(getOptHeaderPtr(loadResult.data(), XEX_HEADER_ENTRY_POINT));
-    ByteSwapInplace(entry);
-
-    auto srcData = loadResult.data() + header->headerSize;
-    auto destData = reinterpret_cast<uint8_t*>(g_memory.Translate(security->loadAddress));
-
-    if (fileFormatInfo->compressionType == XEX_COMPRESSION_NONE)
+    xex_load::Image image;
+    std::string_view error;
+    if (!xex_load::Validate(loadResult, PPC_MEMORY_SIZE, image, error))
     {
-        memcpy(destData, srcData, security->imageSize);
+        LOGFN_ERROR("Invalid module '{}': {}", (const char*)path.u8string().c_str(), error);
+        return 0;
     }
-    else if (fileFormatInfo->compressionType == XEX_COMPRESSION_BASIC)
-    {
-        auto* blocks = reinterpret_cast<const Xex2FileBasicCompressionBlock*>(fileFormatInfo + 1);
-        const size_t numBlocks = (fileFormatInfo->infoSize / sizeof(Xex2FileBasicCompressionInfo)) - 1;
 
-        for (size_t i = 0; i < numBlocks; i++)
-        {
-            memcpy(destData, srcData, blocks[i].dataSize);
-
-            srcData += blocks[i].dataSize;
-            destData += blocks[i].dataSize;
-
-            memset(destData, 0, blocks[i].zeroSize);
-            destData += blocks[i].zeroSize;
-        }
-    }
+    auto srcData = image.data.data();
+    auto destData = reinterpret_cast<uint8_t*>(g_memory.Translate(image.loadAddress));
+    if (image.basicBlocks.empty())
+        memcpy(destData, srcData, image.imageSize);
     else
     {
-        assert(false && "Unknown compression type.");
+        for (size_t offset = 0; offset < image.basicBlocks.size(); offset += sizeof(Xex2FileBasicCompressionBlock))
+        {
+            const auto block = xex_load::Read<Xex2FileBasicCompressionBlock>(image.basicBlocks, offset);
+            memcpy(destData, srcData, block.dataSize);
+
+            srcData += block.dataSize;
+            destData += block.dataSize;
+
+            memset(destData, 0, block.zeroSize);
+            destData += block.zeroSize;
+        }
     }
 
-    auto res = reinterpret_cast<const Xex2ResourceInfo*>(getOptHeaderPtr(loadResult.data(), XEX_HEADER_RESOURCE_INFO));
+    g_xdbfWrapper = XDBFWrapper((uint8_t*)g_memory.Translate(image.resourceAddress), image.resourceSize);
 
-    g_xdbfWrapper = XDBFWrapper((uint8_t*)g_memory.Translate(res->offset.get()), res->sizeOfData);
-
-    return entry;
+    return image.entryPoint;
 }
 
 #ifdef __x86_64__
@@ -255,7 +247,7 @@ int main(int argc, char *argv[])
         Journal journal;
         double lastProgressMiB = 0.0;
         double lastTotalMib = 0.0;
-        Installer::checkInstallIntegrity(GAME_INSTALL_DIRECTORY, journal, [&]()
+        Installer::checkInstallIntegrity(GetGamePath(), journal, [&]()
         {
             constexpr double MiBDivisor = 1024.0 * 1024.0;
             constexpr double MiBProgressThreshold = 128.0;
