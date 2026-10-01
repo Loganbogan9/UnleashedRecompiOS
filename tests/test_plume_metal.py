@@ -117,7 +117,7 @@ int main() {
 }
 '''
     (work / "probe.cpp").write_text(probe)
-    run(compiler, "-std=c++20", "-Wall", "-Wextra", "-Werror", *flags,
+    run(compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", *flags,
         "-I" + str(root / "thirdparty/plume"), str(work / "probe.cpp"), "-o", str(work / "probe"))
     print(run(str(work / "probe")).stdout, end="")
     # Every patch must reverse cleanly and restore the exact pinned sources.

@@ -18,6 +18,7 @@ Each patch applies after the preceding numbered patches.
 | `plume-0002-metal-object-lifetimes.patch` | Adapt `bda4e70`: scope autorelease pools around Metal operations, retain names/command buffers/encoders that escape the pool, and release owned objects. Also adapt `d890ac8` to destroy the null buffer before its device. Additional fixes release dispatch data and the copied device array and preserve correct ownership of the default device. Retains the pinned swapchain API. |
 | `plume-0003-apple-device-capabilities.patch` | Adapt platform guards from `5360587` for iOS and macOS SDK compatibility. Report GPU address support according to Tier 2 argument buffers and the OS availability of `gpuAddress` (iOS 16/macOS 13), rather than inconsistent Apple-family/Metal-3 checks. |
 | `plume-0004-metal-resource-retirement.patch` | Fork fixes: clear retired argument-buffer handles, serialize shared descriptor encoding/resource enumeration, make residency dirty state atomic, reset active pipeline pointers at command-list end, and omit empty semaphore-wait command buffers. Resource hazard tracking and render-pass boundaries remain unchanged. |
+| `plume-0005-metal-live-descriptors.patch` | Fork optimization: track live descriptor slots with a compact bitmap, preserving the exact declaration order and usage flags. Sparse sets scan bitmap words/live entries; sets with at least one-quarter occupancy retain the original sequential scan. Bookkeeping is constant time and uses 8 KiB for the 65,536-slot texture set. |
 
 The Tier 2 requirement follows Apple's [argument buffer documentation](https://developer.apple.com/documentation/metal/improving-cpu-performance-by-using-argument-buffers)
 and [WWDC 2022 presentation](https://developer.apple.com/videos/play/wwdc2022/10101/).
@@ -30,6 +31,34 @@ the actual patched push-constant setters in a portable shell. Sanitizer runs tes
 non-aligned ranges and partial updates. These are Linux tests, not a Metal build.
 Apple builds must validate Objective-C ownership, device capabilities, streaming
 descriptors and command execution with Metal API validation enabled.
+
+`tests/test_metal_descriptor_traversal.py` compiles the actual C++17 resource
+bookkeeping and encoder binding methods against portable mocks. It compares
+ordered declarations to the original full scan, including mixed-usage aliases,
+slot replacement/retirement, partial bitmap words and both density paths. The
+optional `--benchmark` compares CPU traversal and update bookkeeping only, with
+no Metal API calls. Example on Linux x86-64 (Ryzen AI 9 HX 370, Clang `-O3`):
+
+| Live slots / 65,536 | Full scan | Selected traversal |
+| --- | --- | --- |
+| 256 | 16.69 microseconds | 0.408 microseconds |
+| 1,024 | 17.52 microseconds | 0.929 microseconds |
+| 8,192 | 16.32 microseconds | 9.594 microseconds |
+| 16,384 or more | Original sequential scan retained | Original sequential scan retained |
+
+Update bookkeeping in that run increased from 0.85 to 1.16 nanoseconds per
+operation; locking and Metal argument encoding are excluded. Values vary with
+the host and benchmark run. Apple CPU, frame-time and GPU benefits are unmeasured,
+and the occupancy threshold should be checked during device profiling.
+
+One existing behavior needs a targeted Apple audit: fallback `useResource`
+declarations are currently emitted at encoder end. Apple's
+[API documentation](https://developer.apple.com/documentation/metal/mtlrendercommandencoder/useresource%28_%3Ausage%3Astages%3A%29?language=objc)
+specifies calling the method before draw calls that access the resource. These
+patches preserve existing timing; they do not establish that late declarations
+are safe. Test iOS 16/17 (the fallback without residency sets) with API/GPU
+validation and a frame capture. A timing fix should track encoder resource
+changes before draws rather than redeclaring the entire bindless set per draw.
 
 Several later upstream changes were deliberately not included:
 

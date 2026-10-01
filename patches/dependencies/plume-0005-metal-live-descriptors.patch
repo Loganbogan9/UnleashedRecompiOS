@@ -1,0 +1,113 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+index 5753fcb..08a8b5c 100644
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -1729,6 +1729,7 @@ namespace plume {
+         bindImmutableSamplers();
+ 
+         resourceEntries.resize(maxResources);
++        activeResourceWords.resize((size_t(maxResources) + 63) / 64);
+     }
+ 
+     MetalDescriptorSet::~MetalDescriptorSet() {
+@@ -1920,8 +1921,25 @@ namespace plume {
+             argumentBuffer.mtl->didModifyRange(NS::Range(argumentBuffer.offset, argumentBuffer.mtl->length() - argumentBuffer.offset));
+         }
+ 
+-        resourceEntries[descriptorIndex].resource = nativeResource;
+-        resourceEntries[descriptorIndex].type = descriptorType;
++        setResourceEntry(descriptorIndex, nativeResource, descriptorType);
++    }
++
++    void MetalDescriptorSet::setResourceEntry(uint32_t descriptorIndex, MTL::Resource *resource, RenderDescriptorRangeType type) {
++        // Called under descriptorMutex. A compact bitmap keeps updates O(1)
++        // and preserves descriptor order without scanning every empty entry.
++        const uint64_t mask = uint64_t(1) << (descriptorIndex % 64);
++        uint64_t &word = activeResourceWords[descriptorIndex / 64];
++        const bool wasActive = (word & mask) != 0;
++        if (resource != nullptr) {
++            word |= mask;
++            activeResourceCount += !wasActive;
++        }
++        else {
++            word &= ~mask;
++            activeResourceCount -= wasActive;
++        }
++        resourceEntries[descriptorIndex].resource = resource;
++        resourceEntries[descriptorIndex].type = type;
+     }
+ 
+     RenderDescriptorRangeType MetalDescriptorSet::getDescriptorType(const uint32_t binding) const {
+@@ -3602,9 +3620,22 @@ namespace plume {
+             for (const auto* descriptorSet : currentEncoderDescriptorSets) {
+                 if (descriptorSet->residencySet == nullptr) {
+                     std::lock_guard lock(descriptorSet->descriptorMutex);
+-                    for (const auto& entry : descriptorSet->resourceEntries) {
+-                        if (entry.resource != nullptr) {
+-                            computeEncoder->useResource(entry.resource, mapResourceUsage(entry.type));
++                    // Keep the sequential scan for dense sets. The bitmap
++                    // avoids capacity-sized scans for sparse bindless sets.
++                    if (descriptorSet->activeResourceCount >= (descriptorSet->resourceEntries.size() + 3) / 4) {
++                        for (const auto& entry : descriptorSet->resourceEntries) {
++                            if (entry.resource != nullptr) {
++                                computeEncoder->useResource(entry.resource, mapResourceUsage(entry.type));
++                            }
++                        }
++                    } else {
++                        for (size_t wordIndex = 0; wordIndex < descriptorSet->activeResourceWords.size(); wordIndex++) {
++                            uint64_t word = descriptorSet->activeResourceWords[wordIndex];
++                            while (word != 0) {
++                                const auto& entry = descriptorSet->resourceEntries[wordIndex * 64 + __builtin_ctzll(word)];
++                                computeEncoder->useResource(entry.resource, mapResourceUsage(entry.type));
++                                word &= word - 1;
++                            }
+                         }
+                     }
+                 }
+@@ -3620,9 +3651,22 @@ namespace plume {
+             for (const auto* descriptorSet : currentEncoderDescriptorSets) {
+                 if (descriptorSet->residencySet == nullptr) {
+                     std::lock_guard lock(descriptorSet->descriptorMutex);
+-                    for (const auto& entry : descriptorSet->resourceEntries) {
+-                        if (entry.resource != nullptr) {
+-                            renderEncoder->useResource(entry.resource, mapResourceUsage(entry.type), MTL::RenderStageVertex | MTL::RenderStageFragment);
++                    // Keep the sequential scan for dense sets. The bitmap
++                    // avoids capacity-sized scans for sparse bindless sets.
++                    if (descriptorSet->activeResourceCount >= (descriptorSet->resourceEntries.size() + 3) / 4) {
++                        for (const auto& entry : descriptorSet->resourceEntries) {
++                            if (entry.resource != nullptr) {
++                                renderEncoder->useResource(entry.resource, mapResourceUsage(entry.type), MTL::RenderStageVertex | MTL::RenderStageFragment);
++                            }
++                        }
++                    } else {
++                        for (size_t wordIndex = 0; wordIndex < descriptorSet->activeResourceWords.size(); wordIndex++) {
++                            uint64_t word = descriptorSet->activeResourceWords[wordIndex];
++                            while (word != 0) {
++                                const auto& entry = descriptorSet->resourceEntries[wordIndex * 64 + __builtin_ctzll(word)];
++                                renderEncoder->useResource(entry.resource, mapResourceUsage(entry.type), MTL::RenderStageVertex | MTL::RenderStageFragment);
++                                word &= word - 1;
++                            }
+                         }
+                     }
+                 }
+diff --git a/plume_metal.h b/plume_metal.h
+index ff8c72b..7678e34 100644
+--- a/plume_metal.h
++++ b/plume_metal.h
+@@ -215,6 +215,8 @@ namespace plume {
+         std::vector<Descriptor> descriptors;
+         MetalArgumentBuffer argumentBuffer;
+         std::vector<ResourceEntry> resourceEntries;
++        std::vector<uint64_t> activeResourceWords;
++        uint32_t activeResourceCount = 0;
+         MTL::ResidencySet* residencySet = nullptr;
+         mutable std::mutex descriptorMutex;
+         std::atomic<bool> needsCommit = false;
+@@ -227,6 +229,7 @@ namespace plume {
+         void setSampler(uint32_t descriptorIndex, const RenderSampler *sampler) override;
+         void setAccelerationStructure(uint32_t descriptorIndex, const RenderAccelerationStructure *accelerationStructure) override;
+         void setDescriptor(uint32_t descriptorIndex, const Descriptor *descriptor);
++        void setResourceEntry(uint32_t descriptorIndex, MTL::Resource *resource, RenderDescriptorRangeType type);
+         void bindImmutableSamplers() const;
+         void commit();
+         RenderDescriptorRangeType getDescriptorType(uint32_t binding) const;
