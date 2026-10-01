@@ -53,7 +53,7 @@ float4 shaderMain(in float4 position : SV_Position, in float4 texCoord : TEXCOOR
     float2 velocity = (velocityMap.xz + velocityMap.yw / 255.0) * 2.0 - 1.0;
 
     int sampleCount = min(64, round(length(velocity * g_ViewportSize.xy)));
-    float2 sampleOffset = velocity / (float) sampleCount;
+    float2 sampleOffset = velocity / (float) max(sampleCount, 1);
 
     float3 color = sampColor.SampleLevel(sampColor_s, texCoord.xy, 0).rgb;
     int count = 1;

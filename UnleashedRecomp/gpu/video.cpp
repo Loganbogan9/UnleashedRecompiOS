@@ -1,4 +1,9 @@
 #include "video.h"
+#include "bc_decoder.h"
+#include "dds_header.h"
+#include "dds_upload.h"
+
+#include <climits>
 
 #include "imgui/imgui_common.h"
 #include "imgui/imgui_snapshot.h"
@@ -207,6 +212,11 @@ struct SharedConstants
     float halfPixelOffsetY{};
     float alphaThreshold{};
 };
+
+static_assert(offsetof(SharedConstants, texture2DIndices) == 0);
+static_assert(offsetof(SharedConstants, samplerIndices) == 192);
+static_assert(offsetof(SharedConstants, booleans) == 256);
+static_assert(offsetof(SharedConstants, alphaThreshold) == 272);
 
 // Depth bias values here are only used when the render device has 
 // dynamic depth bias capability enabled. Otherwise, they get unused
@@ -6057,245 +6067,36 @@ static void DumpBC7TextureForOfflineDecode(const uint8_t* data, size_t dataSize,
 }
 #endif
 
-static inline uint8_t Expand5To8(uint32_t value)
+static bool DecodeBCToRGBA8Mip0(const uint8_t* data, size_t dataSize, const ddspp::Descriptor& ddsDesc, RenderFormat format, std::vector<uint8_t>& outRGBA)
 {
-    return uint8_t((value << 3) | (value >> 2));
-}
-
-static inline uint8_t Expand6To8(uint32_t value)
-{
-    return uint8_t((value << 2) | (value >> 4));
-}
-
-static void DecodeBC1ColorBlock(const uint8_t* block, uint8_t outRGBA[16 * 4])
-{
-    uint16_t c0 = uint16_t(block[0] | (uint16_t(block[1]) << 8));
-    uint16_t c1 = uint16_t(block[2] | (uint16_t(block[3]) << 8));
-
-    uint8_t colors[4][4] = {};
-
-    colors[0][0] = Expand5To8((c0 >> 11) & 0x1F);
-    colors[0][1] = Expand6To8((c0 >> 5) & 0x3F);
-    colors[0][2] = Expand5To8(c0 & 0x1F);
-    colors[0][3] = 255;
-
-    colors[1][0] = Expand5To8((c1 >> 11) & 0x1F);
-    colors[1][1] = Expand6To8((c1 >> 5) & 0x3F);
-    colors[1][2] = Expand5To8(c1 & 0x1F);
-    colors[1][3] = 255;
-
-    if (c0 > c1)
-    {
-        for (uint32_t i = 0; i < 3; i++)
-        {
-            colors[2][i] = uint8_t((2 * colors[0][i] + colors[1][i]) / 3);
-            colors[3][i] = uint8_t((colors[0][i] + 2 * colors[1][i]) / 3);
-        }
-        colors[2][3] = 255;
-        colors[3][3] = 255;
-    }
-    else
-    {
-        for (uint32_t i = 0; i < 3; i++)
-            colors[2][i] = uint8_t((colors[0][i] + colors[1][i]) / 2);
-
-        colors[2][3] = 255;
-        colors[3][0] = 0;
-        colors[3][1] = 0;
-        colors[3][2] = 0;
-        colors[3][3] = 0;
-    }
-
-    uint32_t indices = uint32_t(block[4]) | (uint32_t(block[5]) << 8) | (uint32_t(block[6]) << 16) | (uint32_t(block[7]) << 24);
-
-    for (uint32_t pixel = 0; pixel < 16; pixel++)
-    {
-        uint32_t colorIndex = (indices >> (pixel * 2)) & 0x3;
-        uint8_t* dst = outRGBA + (pixel * 4);
-        dst[0] = colors[colorIndex][0];
-        dst[1] = colors[colorIndex][1];
-        dst[2] = colors[colorIndex][2];
-        dst[3] = colors[colorIndex][3];
-    }
-}
-
-static void DecodeBC4Block(const uint8_t* block, uint8_t outValues[16])
-{
-    uint8_t v0 = block[0];
-    uint8_t v1 = block[1];
-
-    uint8_t table[8] = {};
-    table[0] = v0;
-    table[1] = v1;
-
-    if (v0 > v1)
-    {
-        table[2] = uint8_t((6 * v0 + 1 * v1) / 7);
-        table[3] = uint8_t((5 * v0 + 2 * v1) / 7);
-        table[4] = uint8_t((4 * v0 + 3 * v1) / 7);
-        table[5] = uint8_t((3 * v0 + 4 * v1) / 7);
-        table[6] = uint8_t((2 * v0 + 5 * v1) / 7);
-        table[7] = uint8_t((1 * v0 + 6 * v1) / 7);
-    }
-    else
-    {
-        table[2] = uint8_t((4 * v0 + 1 * v1) / 5);
-        table[3] = uint8_t((3 * v0 + 2 * v1) / 5);
-        table[4] = uint8_t((2 * v0 + 3 * v1) / 5);
-        table[5] = uint8_t((1 * v0 + 4 * v1) / 5);
-        table[6] = 0;
-        table[7] = 255;
-    }
-
-    uint64_t indices = 0;
-    for (uint32_t i = 0; i < 6; i++)
-        indices |= (uint64_t(block[2 + i]) << (8 * i));
-
-    for (uint32_t p = 0; p < 16; p++)
-        outValues[p] = table[(indices >> (3 * p)) & 0x7];
-}
-
-static bool DecodeBCToRGBA8Mip0(const uint8_t* data, const ddspp::Descriptor& ddsDesc, RenderFormat format, std::vector<uint8_t>& outRGBA)
-{
-    if (ddsDesc.type != ddspp::Texture2D || ddsDesc.arraySize != 1 || ddsDesc.depth != 1)
+    if (ddsDesc.type != ddspp::Texture2D || ddsDesc.arraySize != 1 || ddsDesc.depth != 1 || ddsDesc.headerSize > dataSize)
         return false;
 
-    if (!IsBC1Format(format) && !IsBC2Format(format) && !IsBC3Format(format) && !IsBC4Format(format) && !IsBC5Format(format))
-        return false;
+    BlockCompression::Format blockFormat;
+    if (IsBC1Format(format)) blockFormat = BlockCompression::Format::BC1;
+    else if (IsBC2Format(format)) blockFormat = BlockCompression::Format::BC2;
+    else if (IsBC3Format(format)) blockFormat = BlockCompression::Format::BC3;
+    else if (IsBC4Format(format)) blockFormat = BlockCompression::Format::BC4;
+    else if (IsBC5Format(format)) blockFormat = BlockCompression::Format::BC5;
+    else return false;
 
-    uint32_t width = ddsDesc.width;
-    uint32_t height = ddsDesc.height;
-
-    if (width == 0 || height == 0)
-        return false;
-
-    outRGBA.assign(size_t(width) * size_t(height) * 4, 0);
-
-    const uint8_t* src = data + ddsDesc.headerSize;
-    const uint32_t blocksX = (width + 3) / 4;
-    const uint32_t blocksY = (height + 3) / 4;
-    const uint32_t blockSize = IsBC1Format(format) || IsBC4Format(format) ? 8 : 16;
-
-    uint8_t rgbaBlock[16 * 4] = {};
-    uint8_t alphaBlock[16] = {};
-    uint8_t greenBlock[16] = {};
-
-    for (uint32_t by = 0; by < blocksY; by++)
-    {
-        for (uint32_t bx = 0; bx < blocksX; bx++)
-        {
-            const uint8_t* block = src + size_t(by * blocksX + bx) * blockSize;
-
-            if (IsBC1Format(format))
-            {
-                DecodeBC1ColorBlock(block, rgbaBlock);
-            }
-            else if (IsBC2Format(format))
-            {
-                DecodeBC1ColorBlock(block + 8, rgbaBlock);
-
-                for (uint32_t p = 0; p < 16; p++)
-                {
-                    uint8_t packed = block[p / 2];
-                    uint8_t a4 = (p & 1) ? (packed >> 4) : (packed & 0x0F);
-                    rgbaBlock[p * 4 + 3] = uint8_t((a4 << 4) | a4);
-                }
-            }
-            else if (IsBC3Format(format))
-            {
-                uint8_t a0 = block[0];
-                uint8_t a1 = block[1];
-
-                uint8_t alphaTable[8] = {};
-                alphaTable[0] = a0;
-                alphaTable[1] = a1;
-
-                if (a0 > a1)
-                {
-                    alphaTable[2] = uint8_t((6 * a0 + 1 * a1) / 7);
-                    alphaTable[3] = uint8_t((5 * a0 + 2 * a1) / 7);
-                    alphaTable[4] = uint8_t((4 * a0 + 3 * a1) / 7);
-                    alphaTable[5] = uint8_t((3 * a0 + 4 * a1) / 7);
-                    alphaTable[6] = uint8_t((2 * a0 + 5 * a1) / 7);
-                    alphaTable[7] = uint8_t((1 * a0 + 6 * a1) / 7);
-                }
-                else
-                {
-                    alphaTable[2] = uint8_t((4 * a0 + 1 * a1) / 5);
-                    alphaTable[3] = uint8_t((3 * a0 + 2 * a1) / 5);
-                    alphaTable[4] = uint8_t((2 * a0 + 3 * a1) / 5);
-                    alphaTable[5] = uint8_t((1 * a0 + 4 * a1) / 5);
-                    alphaTable[6] = 0;
-                    alphaTable[7] = 255;
-                }
-
-                uint64_t alphaIndices = 0;
-                for (uint32_t i = 0; i < 6; i++)
-                    alphaIndices |= (uint64_t(block[2 + i]) << (8 * i));
-
-                for (uint32_t p = 0; p < 16; p++)
-                    alphaBlock[p] = alphaTable[(alphaIndices >> (3 * p)) & 0x7];
-
-                DecodeBC1ColorBlock(block + 8, rgbaBlock);
-                for (uint32_t p = 0; p < 16; p++)
-                    rgbaBlock[p * 4 + 3] = alphaBlock[p];
-            }
-            else if (IsBC4Format(format))
-            {
-                DecodeBC4Block(block, alphaBlock);
-                for (uint32_t p = 0; p < 16; p++)
-                {
-                    rgbaBlock[p * 4 + 0] = alphaBlock[p];
-                    rgbaBlock[p * 4 + 1] = 0;
-                    rgbaBlock[p * 4 + 2] = 0;
-                    rgbaBlock[p * 4 + 3] = 255;
-                }
-            }
-            else if (IsBC5Format(format))
-            {
-                DecodeBC4Block(block, alphaBlock);
-                DecodeBC4Block(block + 8, greenBlock);
-
-                for (uint32_t p = 0; p < 16; p++)
-                {
-                    rgbaBlock[p * 4 + 0] = alphaBlock[p];
-                    rgbaBlock[p * 4 + 1] = greenBlock[p];
-                    rgbaBlock[p * 4 + 2] = 0;
-                    rgbaBlock[p * 4 + 3] = 255;
-                }
-            }
-            else
-            {
-                return false;
-            }
-
-            for (uint32_t py = 0; py < 4; py++)
-            {
-                for (uint32_t px = 0; px < 4; px++)
-                {
-                    uint32_t x = bx * 4 + px;
-                    uint32_t y = by * 4 + py;
-                    if (x >= width || y >= height)
-                        continue;
-
-                    size_t dstPixel = (size_t(y) * size_t(width) + x) * 4;
-                    size_t srcPixel = (size_t(py) * 4 + px) * 4;
-                    memcpy(&outRGBA[dstPixel], &rgbaBlock[srcPixel], 4);
-                }
-            }
-        }
-    }
-
-    return true;
+    return BlockCompression::DecodeMip(std::span(data + ddsDesc.headerSize, dataSize - ddsDesc.headerSize),
+        ddsDesc.width, ddsDesc.height, blockFormat, outRGBA);
 }
 
 static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataSize, RenderComponentMapping componentMapping, bool forceCubeMap = false, std::string_view sourceName = {})
 {
     ddspp::Descriptor ddsDesc;
-    if (ddspp::decode_header((unsigned char *)(data), ddsDesc) != ddspp::Error)
+    if (DecodeDdsHeader(data, dataSize, ddsDesc))
     {
+        DdsUploadLayout uploadLayout;
+        if (!BuildDdsUploadLayout(ddsDesc, dataSize, PITCH_ALIGNMENT, PLACEMENT_ALIGNMENT, uploadLayout))
+        {
+            LOGF_WARNING("Rejecting invalid or truncated DDS texture '{}' ({} bytes).", sourceName, dataSize);
+            return false;
+        }
         forceCubeMap &= (ddsDesc.type == ddspp::Texture2D) && (ddsDesc.arraySize == 1);
-        uint32_t arraySize = ddsDesc.type == ddspp::TextureType::Cubemap ? (ddsDesc.arraySize * 6) : ddsDesc.arraySize;
+        uint32_t arraySize = uploadLayout.arraySize;
             
         RenderTextureDesc desc;
         desc.dimension = ConvertTextureDimension(ddsDesc.type);
@@ -6329,17 +6130,26 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
             s_bcFallbackCount++;
 
             std::vector<uint8_t> decodedRGBA;
-            bool decoded = DecodeBCToRGBA8Mip0(data, ddsDesc, desc.format, decodedRGBA);
+            bool decoded = DecodeBCToRGBA8Mip0(data, dataSize, ddsDesc, desc.format, decodedRGBA);
 
             if (decoded)
             {
-                texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(desc.width, desc.height, 1, RenderFormat::R8G8B8A8_UNORM));
+                const RenderFormat decodedFormat = ddsDesc.srgb ? RenderFormat::R8G8B8A8_UNORM_SRGB : RenderFormat::R8G8B8A8_UNORM;
+                texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(desc.width, desc.height, 1, decodedFormat));
                 texture.texture = texture.textureHolder.get();
                 texture.viewDimension = RenderTextureViewDimension::TEXTURE_2D;
                 texture.layout = RenderTextureLayout::COPY_DEST;
+                texture.format = decodedFormat;
+
+                RenderTextureViewDesc viewDesc;
+                viewDesc.format = decodedFormat;
+                viewDesc.dimension = texture.viewDimension;
+                viewDesc.mipLevels = 1;
+                viewDesc.componentMapping = componentMapping;
+                texture.textureView = texture.texture->createTextureView(viewDesc);
 
                 texture.descriptorIndex = g_textureDescriptorAllocator.allocate();
-                g_textureDescriptorSet->setTexture(texture.descriptorIndex, texture.texture, RenderTextureLayout::SHADER_READ);
+                g_textureDescriptorSet->setTexture(texture.descriptorIndex, texture.texture, RenderTextureLayout::SHADER_READ, texture.textureView.get());
 
                 uint32_t rowPitch = (desc.width * 4 + PITCH_ALIGNMENT - 1) & ~(PITCH_ALIGNMENT - 1);
                 uint32_t slicePitch = rowPitch * desc.height;
@@ -6359,7 +6169,7 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
                         g_copyCommandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(texture.texture, RenderTextureLayout::COPY_DEST));
                         g_copyCommandList->copyTextureRegion(
                             RenderTextureCopyLocation::Subresource(texture.texture, 0, 0),
-                            RenderTextureCopyLocation::PlacedFootprint(uploadBuffer.get(), RenderFormat::R8G8B8A8_UNORM, desc.width, desc.height, 1, rowPitch / 4, 0));
+                            RenderTextureCopyLocation::PlacedFootprint(uploadBuffer.get(), decodedFormat, desc.width, desc.height, 1, rowPitch / 4, 0));
                     });
 
                 texture.width = desc.width;
@@ -6452,44 +6262,8 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
         texture.height = ddsDesc.height;
         texture.viewDimension = viewDesc.dimension;
 
-        struct Slice
-        {
-            uint32_t width;
-            uint32_t height;
-            uint32_t depth;
-            uint32_t srcOffset;
-            uint32_t dstOffset;
-            uint32_t srcRowPitch;
-            uint32_t dstRowPitch;
-            uint32_t rowCount;
-        };
-
-        std::vector<Slice> slices;
-        uint32_t curSrcOffset = 0;
-        uint32_t curDstOffset = 0;
-
-        for (uint32_t arraySlice = 0; arraySlice < arraySize; arraySlice++)
-        {
-            for (uint32_t mipSlice = 0; mipSlice < ddsDesc.numMips; mipSlice++)
-            {
-                auto& slice = slices.emplace_back();
-
-                slice.width = std::max(1u, ddsDesc.width >> mipSlice);
-                slice.height = std::max(1u, ddsDesc.height >> mipSlice);
-                slice.depth = std::max(1u, ddsDesc.depth >> mipSlice);
-                slice.srcOffset = curSrcOffset;
-                slice.dstOffset = curDstOffset;
-                uint32_t rowPitch = ((slice.width + ddsDesc.blockWidth - 1) / ddsDesc.blockWidth) * ddsDesc.bitsPerPixelOrBlock;
-                slice.srcRowPitch = (rowPitch + 7) / 8;
-                slice.dstRowPitch = (slice.srcRowPitch + PITCH_ALIGNMENT - 1) & ~(PITCH_ALIGNMENT - 1);
-                slice.rowCount = (slice.height + ddsDesc.blockHeight - 1) / ddsDesc.blockHeight;
-
-                curSrcOffset += slice.srcRowPitch * slice.rowCount * slice.depth;
-                curDstOffset += (slice.dstRowPitch * slice.rowCount * slice.depth + PLACEMENT_ALIGNMENT - 1) & ~(PLACEMENT_ALIGNMENT - 1);
-            }
-        }
-
-        auto uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(curDstOffset));
+        auto& slices = uploadLayout.slices;
+        auto uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(uploadLayout.uploadSize));
         uint8_t* mappedMemory = reinterpret_cast<uint8_t*>(uploadBuffer->map());
 
         for (auto& slice : slices)
@@ -6499,11 +6273,11 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
 
             if (slice.srcRowPitch == slice.dstRowPitch)
             {
-                memcpy(dstData, srcData, slice.srcRowPitch * slice.rowCount * slice.depth);
+                memcpy(dstData, srcData, size_t(slice.srcRowPitch) * slice.rowCount * slice.depth);
             }
             else
             {
-                for (size_t i = 0; i < slice.rowCount * slice.depth; i++)
+                for (size_t i = 0; i < size_t(slice.rowCount) * slice.depth; i++)
                 {
                     memcpy(dstData, srcData, slice.srcRowPitch);
                     srcData += slice.srcRowPitch;
@@ -6518,11 +6292,11 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
             {
                 g_copyCommandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(texture.texture, RenderTextureLayout::COPY_DEST));
 
-                auto copyTextureRegion = [&](Slice& slice, uint32_t subresourceIndex)
+                auto copyTextureRegion = [&](const DdsUploadSlice& slice, uint32_t subresourceIndex)
                     {
                         g_copyCommandList->copyTextureRegion(
                             RenderTextureCopyLocation::Subresource(texture.texture, subresourceIndex % ddsDesc.numMips, subresourceIndex / ddsDesc.numMips),
-                            RenderTextureCopyLocation::PlacedFootprint(uploadBuffer.get(), desc.format, slice.width, slice.height, slice.depth, (slice.dstRowPitch * 8) / ddsDesc.bitsPerPixelOrBlock * ddsDesc.blockWidth, slice.dstOffset));
+                            RenderTextureCopyLocation::PlacedFootprint(uploadBuffer.get(), desc.format, slice.width, slice.height, slice.depth, slice.rowWidth, slice.dstOffset));
                     };
 
                 for (size_t i = 0; i < slices.size(); i++)
@@ -6543,8 +6317,10 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
     }
     else
     {
+        if (data == nullptr || dataSize > INT_MAX)
+            return false;
         int width, height;
-        void* stbImage = stbi_load_from_memory(data, dataSize, &width, &height, nullptr, 4);
+        void* stbImage = stbi_load_from_memory(data, int(dataSize), &width, &height, nullptr, 4);
 
         if (stbImage != nullptr)
         {

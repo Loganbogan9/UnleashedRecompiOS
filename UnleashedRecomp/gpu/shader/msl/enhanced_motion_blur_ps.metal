@@ -37,7 +37,7 @@ float4 shaderMain(float4 position [[position]],
     float2 velocity = (velocityMap.xz + velocityMap.yw / 255.0) * 2.0 - 1.0;
 
     int sampleCount = min(64, int(round(length(velocity * g_ViewportSize.xy))));
-    float2 sampleOffset = velocity / (float) sampleCount;
+    float2 sampleOffset = velocity / float(max(sampleCount, 1));
 
     float3 color = sampColor.sample(sampColor_s, input.texCoord.xy, level(0)).rgb;
     int count = 1;
@@ -46,7 +46,7 @@ float4 shaderMain(float4 position [[position]],
     {
         float2 sampleCoord = input.texCoord.xy + sampleOffset * i;
         float3 sampleColor = sampColor.sample(sampColor_s, sampleCoord, level(0)).rgb;
-        float sampleDepth = sampZBuffer.sample(sampZBuffer_s, sampleCoord, 0).x;
+        float sampleDepth = sampZBuffer.sample(sampZBuffer_s, sampleCoord, level(0)).x;
 
         if (sampleDepth - depth < 0.01)
         {

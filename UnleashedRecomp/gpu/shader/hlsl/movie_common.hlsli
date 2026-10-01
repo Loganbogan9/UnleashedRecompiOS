@@ -13,11 +13,11 @@
 #define Tex3_ResourceDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 12)
 #define Tex4_ResourceDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 16)
 
-#define Tex0_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 64)
-#define Tex1_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 68)
-#define Tex2_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 72)
-#define Tex3_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 76)
-#define Tex4_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 80)
+#define Tex0_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192)
+#define Tex1_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 196)
+#define Tex2_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 200)
+#define Tex3_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 204)
+#define Tex4_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 208)
 
 #else
 
@@ -35,11 +35,11 @@ cbuffer SharedConstants : register(b2, space4)
     uint Tex3_ResourceDescriptorIndex : packoffset(c0.w);
     uint Tex4_ResourceDescriptorIndex : packoffset(c1.x);
     
-    uint Tex0_SamplerDescriptorIndex : packoffset(c4.x);
-    uint Tex1_SamplerDescriptorIndex : packoffset(c4.y);
-    uint Tex2_SamplerDescriptorIndex : packoffset(c4.z);
-    uint Tex3_SamplerDescriptorIndex : packoffset(c4.w);
-    uint Tex4_SamplerDescriptorIndex : packoffset(c5.x);
+    uint Tex0_SamplerDescriptorIndex : packoffset(c12.x);
+    uint Tex1_SamplerDescriptorIndex : packoffset(c12.y);
+    uint Tex2_SamplerDescriptorIndex : packoffset(c12.z);
+    uint Tex3_SamplerDescriptorIndex : packoffset(c12.w);
+    uint Tex4_SamplerDescriptorIndex : packoffset(c13.x);
     
     DEFINE_SHARED_CONSTANTS();
 };
