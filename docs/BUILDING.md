@@ -4,7 +4,7 @@
 
 Clone **UnleashedRecomp** with submodules using [Git](https://git-scm.com/).
 ```
-git clone --recurse-submodules https://github.com/hedge-dev/UnleashedRecomp.git
+git clone --recurse-submodules https://github.com/Loganbogan9/UnleashedRecompiOS.git
 ```
 
 ### Windows
@@ -39,7 +39,7 @@ In the installer, you must select the following **Workloads** and **Individual c
 ### Linux
 The following command will install the required dependencies on a distro that uses `apt` (such as Debian-based distros).
 ```bash
-sudo apt install autoconf automake libtool pkg-config curl cmake ninja-build clang clang-tools libgtk-3-dev
+sudo apt install autoconf automake libtool pkg-config curl cmake ninja-build clang clang-tools libgtk-3-dev libpulse-dev
 ```
 The following command will install the required dependencies on a distro that uses `pacman` (such as Arch-based distros).
 ```bash
@@ -51,7 +51,7 @@ You can also find the equivalent packages for your preferred distro.
 > This list may not be comprehensive for your particular distro and you may be required to install additional packages, should an error occur during configuration.
 
 ### macOS / iOS
-You will need to install Xcode 16.3+ or the equivalent Xcode Command Line Tools from Apple.
+For iOS, install full Xcode 16.3+ with the iOS SDK and Metal compiler tools. Select the intended installation with `xcode-select` or `DEVELOPER_DIR`. The Command Line Tools alone do not provide the complete iOS build environment.
 
 The following commands will install additional required dependencies, depending on which package manager you use.
 
@@ -116,40 +116,60 @@ cmake --build ./out/build/macos-release --target UnleashedRecomp
 open -a UnleashedRecomp.app
 ```
 
-### iOS (experimental)
-1. Configure the project with the iOS preset.
+### iOS with Xcode (experimental)
+
+The app requires iOS 16.0 or later and a GPU supporting Tier 2 argument buffers. Use the same Release build for Xcode and sideloading comparisons. The renderer uses ahead-of-time shaders and CPU recompilation; no runtime JIT entitlement is requested.
+
+1. Prepare resources, PowerPC sources, and **iPhoneOS** game shaders using tools running natively on the Mac. Provide the game files described above first.
+
 ```bash
-cmake . --preset ios-xcode-debug
+cmake --preset macos-release -DUNLEASHED_RECOMP_SHADER_TARGET_SDK=iphoneos
+cmake --build out/build/macos-release --target UnleashedRecompArtifacts
 ```
 
-> [!NOTE]
-> The available presets are `ios-xcode-debug` and `ios-xcode-release`.
+`UnleashedRecompArtifacts` generates inputs without linking the macOS application. An old cache without SDK provenance, or one compiled for macOS, is rejected by the iOS configuration. The handwritten Metal libraries are generated separately in each build directory and embedded from their newly compiled bytes.
 
-2. Build the target.
+Game shader/PPC/resource outputs still live in the source tree. Do not generate macOS and iOS game caches concurrently in the same checkout. To build a macOS app later, switch the host option back to `macosx` and regenerate; a configured iOS build rechecks provenance if that shared cache changes. For simultaneous development, use separate checkouts with their own generated game inputs.
+
+2. Configure the Xcode project with your own signing identity and bundle identifier.
+
 ```bash
-cmake --build ./out/build/ios-debug --target UnleashedRecomp
+cmake --preset ios-xcode-release \
+    -DUNLEASHED_RECOMP_IOS_DEVELOPMENT_TEAM=YOURTEAMID \
+    -DUNLEASHED_RECOMP_IOS_BUNDLE_ID=com.yourname.unleashedrecomp
+cmake --build --preset ios-xcode-release
+open out/build/ios-xcode-release/UnleashedRecomp-ALL.xcodeproj
 ```
 
-3. Open the generated Xcode project/build output for signing and deployment to a device.
+The `ios-xcode-debug`, `ios-xcode-relwithdebinfo`, and `ios-xcode-release` build presets explicitly select their matching Xcode configuration. Release uses `-O2 -g -DNDEBUG`; symbols remain available while assertions and debug validation follow the selected configuration. The iOS document picker is compiled with ARC.
 
-### iOS with Xcode (device install) (recommended)
-1. Configure with the Xcode generator preset.
+3. Select the device and `UnleashedRecomp` target in Xcode. Check Signing & Capabilities. For distribution, archive the **Release** configuration and export/sign the resulting app through your intended method. Retain the archive and dSYM for crash symbolication.
+
+4. Check the app and exported IPA before installation:
+
 ```bash
-cmake . --preset ios-xcode-debug \
-	-DUNLEASHED_RECOMP_IOS_DEVELOPMENT_TEAM=YOURTEAMID \
-	-DUNLEASHED_RECOMP_IOS_BUNDLE_ID=com.yourname.unleashedrecomp
+python3 tools/check_ios_package.py /path/to/UnleashedRecomp.app
+python3 tools/check_ios_package.py /path/to/UnleashedRecomp.ipa
 ```
 
-2. Open the generated Xcode project.
+The checker validates bundle metadata, executable permissions, device ARM64 Mach-O platform, embedded library references and signature-command extents. It does not verify cryptographic signatures or provisioning. On a Mac, inspect the app's signed entitlements and `embedded.mobileprovision`, and repeat for the final re-signed SideStore app when available. Compare application identifier, Team ID, `get-task-allow`, memory-related entitlements and any embedded frameworks. The project does not add a privileged JIT or increased-memory entitlement.
+
+5. Launch from the home screen without a debugger as well as through Xcode. Follow [the controlled deployment matrix](IOS_DEPLOYMENT.md) and retain `unleashedrecomp.log`, its `.previous` file, and the matching device crash/watchdog/jetsam report. Installer and DLC actions that request restart now persist a one-shot request and ask for a manual relaunch on iOS.
+
+The Ninja iOS presets remain available for cross-compilation, but signing/export and installation should be verified through the Xcode archive workflow above. Native iOS compilation and packaging cannot be validated on Linux.
+
+## Portable validation without game inputs or Apple SDKs
+
+This mode bypasses vcpkg and the game generators. It requires CMake, Python, a C/C++20 compiler, and the initialized submodules. The AIR compiler command tests use the generator's pinned fmt submodule and mock `xcrun`, not the Metal compiler.
+
 ```bash
-open ./out/build/ios-xcode-debug/UnleashedRecomp.xcodeproj
+cmake -S . -B out/tests -G Ninja \
+    -DUNLEASHED_RECOMP_PORTABLE_TESTS_ONLY=ON \
+    -DUNLEASHED_RECOMP_TEST_SANITIZERS=ON \
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Debug
+cmake --build out/tests
+ctest --test-dir out/tests --output-on-failure
 ```
 
-3. In Xcode, select your iPhone/iPad as the run destination and run the `UnleashedRecomp` target.
-
-4. If needed, adjust signing under **Signing & Capabilities** (Automatic signing is enabled by CMake).
-
-5. To build to an IPA, use the Archive feature in Xcode.
-
-> [!IMPORTANT]
-> Current iOS support is experimental and uses pre-generated recompilation/resource artifacts during cross-builds (host-side recompilers and desktop-native file pickers are skipped).
+The tests cover production portable runtime/installer code and bounded shader/texture utilities. Simulated SDK commands, packaging fixtures and Metal source-layout checks are identified separately in [the engineering audit](ENGINEERING_AUDIT.md). They do not establish MSL compatibility, iOS linking, signing correctness or device performance.

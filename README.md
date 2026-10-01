@@ -43,7 +43,7 @@ Unleashed Recompiled is an unofficial PC port of the Xbox 360 version of Sonic U
   - Windows 10 (version 1909)
   - A modern Linux distro such as Ubuntu 22.04 LTS
   - macOS 13.0
-  - iOS 15.0
+  - iOS 16.0, with Tier 2 argument buffer support
 - Storage:
   - With DLC: 10 GiB required
   - Without DLC: 6 GiB required
@@ -288,19 +288,17 @@ Simply booting at least once in Desktop Mode will enable the Deck to use the fil
 
 ### Broken Textures on iOS
 
-This is a hardware issue with iOS not supporting BC7 textures. Every time you encounter a texture that the game can't decode, it will dump it to UnleashedRecomp/bc7_dump, named after the hash of the texture. If you go to a tool like NVIDIA Texture Tools Exporter and convert it to a format such as BC3, you can put it in UnleashedRecomp/bc7_override and it will then load the texture from there.
+The iOS fallback decodes supported BC1–BC5 textures on the CPU. BC7 still requires a preconverted override on devices where the current backend cannot use it. Missing textures are dumped under `UnleashedRecomp/bc7_dump` using the texture hash as the filename; convert them to a supported format such as BC3 and place them under `UnleashedRecomp/bc7_override`. Signed BC4/BC5 and complete fallback mip-chain handling remain areas for further validation.
 
-### iOS Build Crashing after long playtime/exiting to menu and returning to gameplay a few times
+### iOS crashes after repeated gameplay sessions
 
-This is an issue with how memory management is handled on iOS, basically the game can't free memory properly and memory usage grows over time, with the problem being made FAR worse while running with a debugger. For most gameplay, this shouldn't be an issue as it doesn't grow very fast unless the gameplay state is loaded multiple times.
+The renderer now retains pipelines until their frame fence completes, clears retired texture descriptors, and balances several Metal object lifetimes. These changes address specific lifetime defects found in source review. Their effect on device memory pressure has not yet been measured. Include a device jetsam/crash report and memory checkpoints when reporting repeated stage-loading failures.
 
-Why it grows even faster on a debugger, I have no clue. If you can figure it out, please submit a PR.
->Update:
->This may be fixed??? I didn't change anything other than compiling with -O2 but the memory usage without a debugger may have gone away.
+### iOS IPA fails after the installer
 
-### iOS IPA does not work past installer
+This remains an unresolved device-validation issue. The current installer continues in the same process and retains the Metal device. Source review identified long main-thread pipeline waits, stale or wrong-platform embedded shader libraries, configuration differences, and unsupported process restart requests as concrete problems to address. None proves the cause of the original SideStore report.
 
-I genuninely have no clue what's causing this, as the logging just entirely dies but the app doesn't somehow. If you have some clue what the heck is happening with this (I suspect it's something to do with the Metal handoff when the program soft restarts) PLEASE open an issue or a PR.
+Build and compare the same Release app with and without an Xcode debugger, then through SideStore. See [the deployment investigation and exact tests](docs/IOS_DEPLOYMENT.md), [the build/IPA checks](docs/BUILDING.md), and [the engineering audit](docs/ENGINEERING_AUDIT.md). Startup logs now record debugger/configuration state, memory checkpoints and loading progress; they rotate instead of growing indefinitely.
 
 ## FAQ
 
