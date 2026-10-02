@@ -160,7 +160,7 @@ The Ninja iOS presets remain available for cross-compilation, but signing/export
 
 ## Portable validation without game inputs or Apple SDKs
 
-This mode bypasses vcpkg and the game generators. It requires CMake, Python, a C/C++20 compiler, and the initialized submodules. The AIR compiler command tests use the generator's pinned fmt submodule and mock `xcrun`, not the Metal compiler.
+This mode bypasses vcpkg and the game generators. It requires CMake, Python, a C/C++20 compiler, and the initialized submodules. On Linux, install the X11 development headers (`libx11-dev` on Ubuntu): the portable Metal probes include plume's shared interface header, which declares its Linux window types using Xlib. The AIR compiler command tests use the generator's pinned fmt submodule and mock `xcrun`, not the Metal compiler.
 
 ```bash
 cmake -S . -B out/tests -G Ninja \

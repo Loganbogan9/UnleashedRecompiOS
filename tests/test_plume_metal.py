@@ -11,7 +11,16 @@ import tempfile
 
 
 def run(*arguments):
-    return subprocess.run(arguments, check=True, capture_output=True, text=True)
+    try:
+        return subprocess.run(arguments, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        # CTest can only report compiler diagnostics if they reach this process's
+        # output; retaining them solely in the exception hides the actual error.
+        if error.stdout:
+            sys.stderr.write(error.stdout)
+        if error.stderr:
+            sys.stderr.write(error.stderr)
+        raise
 
 
 def function(source, signature):
