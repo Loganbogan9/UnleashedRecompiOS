@@ -6180,7 +6180,7 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
                 size_t slicePitch;
                 if (!BuildRgba8UploadFootprint(desc.width, desc.height, PITCH_ALIGNMENT, rowPitch, slicePitch))
                     return false;
-                const RenderFormat decodedFormat = ddsDesc.srgb ? RenderFormat::R8G8B8A8_UNORM_SRGB : RenderFormat::R8G8B8A8_UNORM;
+                const RenderFormat decodedFormat = RenderFormat::R8G8B8A8_UNORM;
                 texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(desc.width, desc.height, 1, decodedFormat));
                 texture.texture = texture.textureHolder.get();
                 texture.viewDimension = RenderTextureViewDimension::TEXTURE_2D;
