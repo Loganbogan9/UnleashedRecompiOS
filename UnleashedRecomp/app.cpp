@@ -5,6 +5,7 @@
 #include <kernel/function.h>
 #include <os/process.h>
 #include <os/logger.h>
+#include <os/app_lifecycle.h>
 #include <patches/audio_patches.h>
 #include <patches/inspire_patches.h>
 #include <ui/game_window.h>
@@ -79,6 +80,9 @@ static std::thread::id g_mainThreadId = std::this_thread::get_id();
 PPC_FUNC_IMPL(__imp__sub_822C1130);
 PPC_FUNC(sub_822C1130)
 {
+#if defined(UNLEASHED_RECOMP_IOS)
+    app_lifecycle::WaitForFrame(ctx.f1.f64);
+#endif
     Video::WaitOnSwapChain();
 
     // Correct small delta time errors.

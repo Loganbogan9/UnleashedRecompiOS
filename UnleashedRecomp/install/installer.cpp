@@ -1,10 +1,19 @@
 #include "installer.h"
 
+#include <cstring>
 #include <xxh3.h>
 
 #include "directory_file_system.h"
 #include "iso_file_system.h"
 #include "xcontent_file_system.h"
+
+#if defined(UNLEASHED_RECOMP_IOS)
+#include "gpu/astc_cache.h"
+#include "gpu/bc_decoder.h"
+#include "gpu/dds_header.h"
+#include <bc7decomp.h>
+#include <plume_render_interface_types.h>
+#endif
 
 #include "hashes/apotos_shamar.h"
 #include "hashes/chunnan.h"
@@ -144,7 +153,75 @@ static bool checkFile(const FilePair &pair, const uint64_t *fileHashes, const st
     return true;
 }
 
-static bool copyFile(const FilePair &pair, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, bool skipHashChecks, std::vector<uint8_t> &fileData, Journal &journal, const std::function<bool()> &progressCallback) {
+#if defined(UNLEASHED_RECOMP_IOS)
+static bool BuildASTCCacheForTexture(const std::filesystem::path& cacheRoot, std::span<const uint8_t> fileData)
+{
+    ddspp::Descriptor descriptor{};
+    if (!DecodeDdsHeader(fileData.data(), fileData.size(), descriptor) || descriptor.type != ddspp::Texture2D ||
+        descriptor.arraySize != 1 || descriptor.depth != 1 || descriptor.numMips == 0)
+        return true;
+
+    const bool bc3 = descriptor.format == ddspp::BC3_UNORM || descriptor.format == ddspp::BC3_UNORM_SRGB;
+    const bool bc7 = descriptor.format == ddspp::BC7_UNORM || descriptor.format == ddspp::BC7_UNORM_SRGB;
+    if (!bc3 && !bc7)
+        return true;
+
+    std::vector<uint8_t> rgba;
+    const auto payload = fileData.subspan(descriptor.headerSize);
+    bool decoded = false;
+    if (bc3)
+    {
+        decoded = BlockCompression::DecodeMip(payload, descriptor.width, descriptor.height,
+            BlockCompression::Format::BC3, rgba);
+    }
+    else
+    {
+        const size_t blocksX = descriptor.width / 4 + (descriptor.width % 4 != 0);
+        const size_t blocksY = descriptor.height / 4 + (descriptor.height % 4 != 0);
+        if (blocksX == 0 || blocksY == 0 || blocksX > payload.size() / 16 / blocksY)
+            return true;
+
+        rgba.assign(size_t(descriptor.width) * descriptor.height * 4, 0);
+        decoded = true;
+        for (uint32_t by = 0; by < blocksY && decoded; by++)
+        {
+            for (uint32_t bx = 0; bx < blocksX; bx++)
+            {
+                bc7decomp::color_rgba pixels[16];
+                decoded = bc7decomp::unpack_bc7(payload.data() + (size_t(by) * blocksX + bx) * 16, pixels);
+                if (!decoded)
+                    break;
+                for (uint32_t py = 0; py < 4; py++)
+                {
+                    for (uint32_t px = 0; px < 4; px++)
+                    {
+                        const uint32_t x = bx * 4 + px;
+                        const uint32_t y = by * 4 + py;
+                        if (x < descriptor.width && y < descriptor.height)
+                            std::memcpy(&rgba[(size_t(y) * descriptor.width + x) * 4], &pixels[py * 4 + px], 4);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!decoded)
+        return true;
+
+    const auto cacheFormat = static_cast<uint32_t>(((bc7 && descriptor.format == ddspp::BC7_UNORM_SRGB) ||
+        (bc3 && descriptor.format == ddspp::BC3_UNORM_SRGB)) ? plume::RenderFormat::ASTC_6x6_UNORM_SRGB :
+        plume::RenderFormat::ASTC_6x6_UNORM);
+    std::vector<uint8_t> astc;
+    if (EncodeRGBA8ToASTC(rgba, descriptor.width, descriptor.height, 6, 6, astc))
+    {
+        StoreASTCCache(cacheRoot, HashTextureForASTCCache(fileData.data(), fileData.size()),
+            descriptor.width, descriptor.height, cacheFormat, astc);
+    }
+    return true;
+}
+#endif
+
+static bool copyFile(const FilePair &pair, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::filesystem::path &cacheRoot, bool skipHashChecks, std::vector<uint8_t> &fileData, Journal &journal, const std::function<bool()> &progressCallback) {
     const std::string filename(pair.first);
     const uint32_t hashCount = pair.second;
     if (!sourceVfs.exists(filename))
@@ -177,6 +254,11 @@ static bool copyFile(const FilePair &pair, const uint64_t *fileHashes, VirtualFi
             return false;
         }
     }
+
+#if defined(UNLEASHED_RECOMP_IOS)
+    if (toLower(fromPath(std::filesystem::path(filename).extension())) == ".dds")
+        BuildASTCCacheForTexture(cacheRoot, fileData);
+#endif
 
     std::filesystem::path targetPath = targetDirectory / std::filesystem::path(std::u8string_view((const char8_t *)(pair.first)));
     std::filesystem::path parentPath = targetPath.parent_path();
@@ -443,7 +525,7 @@ bool Installer::checkFiles(std::span<const FilePair> filePairs, const uint64_t *
     return true;
 }
 
-bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::string &validationFile, bool skipHashChecks, Journal &journal, const std::function<bool()> &progressCallback)
+bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::filesystem::path &cacheRoot, const std::string &validationFile, bool skipHashChecks, Journal &journal, const std::function<bool()> &progressCallback)
 {
     std::error_code ec;
     if (!std::filesystem::exists(targetDirectory) && !std::filesystem::create_directories(targetDirectory, ec))
@@ -470,7 +552,7 @@ bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *f
             continue;
         }
 
-        if (!copyFile(pair, &fileHashes[hashIndex], sourceVfs, targetDirectory, skipHashChecks, fileData, journal, progressCallback))
+        if (!copyFile(pair, &fileHashes[hashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, fileData, journal, progressCallback))
         {
             return false;
         }
@@ -479,7 +561,7 @@ bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *f
     // Validation file is copied last after all other files have been copied.
     if (validationPair.first != nullptr)
     {
-        if (!copyFile(validationPair, &fileHashes[validationHashIndex], sourceVfs, targetDirectory, skipHashChecks, fileData, journal, progressCallback))
+        if (!copyFile(validationPair, &fileHashes[validationHashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, fileData, journal, progressCallback))
         {
             return false;
         }
@@ -588,7 +670,7 @@ bool Installer::install(const Sources &sources, const std::filesystem::path &tar
 
     for (const DLCSource &dlcSource : sources.dlc)
     {
-        if (!copyFiles(dlcSource.filePairs, dlcSource.fileHashes, *dlcSource.sourceVfs, targetDirectory / dlcSource.targetSubDirectory, DLCValidationFile, skipHashChecks, journal, progressCallback))
+        if (!copyFiles(dlcSource.filePairs, dlcSource.fileHashes, *dlcSource.sourceVfs, targetDirectory / dlcSource.targetSubDirectory, targetDirectory, DLCValidationFile, skipHashChecks, journal, progressCallback))
         {
             return false;
         }
@@ -601,13 +683,13 @@ bool Installer::install(const Sources &sources, const std::filesystem::path &tar
     }
 
     // Install the update.
-    if (!copyFiles({ UpdateFiles, UpdateFilesSize }, UpdateHashes, *sources.update, targetDirectory / UpdateDirectory, UpdateExecutablePatchFile, skipHashChecks, journal, progressCallback))
+    if (!copyFiles({ UpdateFiles, UpdateFilesSize }, UpdateHashes, *sources.update, targetDirectory / UpdateDirectory, targetDirectory, UpdateExecutablePatchFile, skipHashChecks, journal, progressCallback))
     {
         return false;
     }
 
     // Install the base game.
-    if (!copyFiles({ GameFiles, GameFilesSize }, GameHashes, *sources.game, targetDirectory / GameDirectory, GameExecutableFile, skipHashChecks, journal, progressCallback))
+    if (!copyFiles({ GameFiles, GameFilesSize }, GameHashes, *sources.game, targetDirectory / GameDirectory, targetDirectory, GameExecutableFile, skipHashChecks, journal, progressCallback))
     {
         return false;
     }

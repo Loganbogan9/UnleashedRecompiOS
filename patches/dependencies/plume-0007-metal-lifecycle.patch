@@ -1,0 +1,184 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -16,9 +16,11 @@
+ 
+ #include <algorithm>
+ #include <mutex>
++#include <unordered_map>
+ 
+ #include "plume_metal.h"
+ #include "plume_metal_diagnostics.h"
++#include "plume_metal_lifecycle.h"
+ 
+ extern "C" {
+     void *objc_autoreleasePoolPush(void);
+@@ -1027,6 +1029,68 @@
+         reportMetalDiagnostic(message, true);
+     }
+ 
++    // Serialize deactivation with every native commit, including copy/acquire/
++    // wait/present buffers. Never wait for guest work from UIKit's main thread.
++#if TARGET_OS_IPHONE
++    struct MetalSubmissionState {
++        std::mutex mutex;
++        std::condition_variable changed;
++        bool active = true;
++        std::unordered_map<MTL::CommandQueue *, NS::SharedPtr<MTL::CommandBuffer>> lastSubmitted;
++    };
++
++    static MetalSubmissionState &metalSubmissionState() {
++        static MetalSubmissionState state;
++        return state;
++    }
++#endif
++
++    static void waitForMetalAppActive() {
++#if TARGET_OS_IPHONE
++        auto &state = metalSubmissionState();
++        std::unique_lock lock(state.mutex);
++        state.changed.wait(lock, [&state] { return state.active; });
++#endif
++    }
++
++    static void commitMetalCommandBuffer(MTL::CommandBuffer *buffer) {
++#if TARGET_OS_IPHONE
++        auto &state = metalSubmissionState();
++        std::unique_lock lock(state.mutex);
++        state.changed.wait(lock, [&state] { return state.active; });
++#endif
++        // Reserve queue order only when we can also commit. An enqueued,
++        // uncommitted buffer ahead of a committed one could prevent the latter
++        // from being scheduled while the app's submission gate is closed.
++        buffer->enqueue();
++        buffer->commit();
++#if TARGET_OS_IPHONE
++        state.lastSubmitted[buffer->commandQueue()] = NS::RetainPtr(buffer);
++#endif
++    }
++
++    void setMetalAppActive(bool active) {
++#if TARGET_OS_IPHONE
++        MetalAutoreleasePool releasePool;
++        auto &state = metalSubmissionState();
++        std::unique_lock lock(state.mutex);
++        state.active = active;
++        if (!active) {
++            // Apple requires pending work on EVERY queue to be scheduled before
++            // applicationDidEnterBackground returns. This does not wait for
++            // completion or for any guest/UI callback to submit another frame.
++            for (auto &[queue, buffer] : state.lastSubmitted) {
++                buffer->waitUntilScheduled();
++            }
++            state.lastSubmitted.clear();
++        }
++        lock.unlock();
++        if (active) {
++            state.changed.notify_all();
++        }
++#endif
++    }
++
+     // MARK: - Helper Structures
+ 
+     MetalDescriptorSetLayout::MetalDescriptorSetLayout(MetalDevice *device, const RenderDescriptorSetDesc &desc) {
+@@ -2045,6 +2109,8 @@
+     }
+ 
+     bool MetalSwapChain::present(const uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, const uint32_t waitSemaphoreCount) {
++        waitForMetalAppActive();
++
+         if (layer == nullptr || textureIndex >= drawables.size() || drawables[textureIndex].mtl == nullptr) {
+             return false;
+         }
+@@ -2060,7 +2126,6 @@
+             return false;
+         }
+         presentBuffer->setLabel(MTLSTR("Present Command Buffer"));
+-        presentBuffer->enqueue();
+ 
+         for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
+             MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(waitSemaphores[i]);
+@@ -2095,7 +2160,7 @@
+             state->condition.notify_all();
+         });
+ 
+-        presentBuffer->commit();
++        commitMetalCommandBuffer(presentBuffer);
+         drawable.mtl->release();
+         drawable.mtl = nullptr;
+ 
+@@ -2165,6 +2230,8 @@
+     }
+ 
+     bool MetalSwapChain::acquireTexture(RenderCommandSemaphore *signalSemaphore, uint32_t *textureIndex) {
++        waitForMetalAppActive();
++
+         if (layer == nullptr || width == 0 || height == 0 || signalSemaphore == nullptr || textureIndex == nullptr) {
+             return false;
+         }
+@@ -2189,10 +2256,9 @@
+         }
+         acquireBuffer->setLabel(MTLSTR("Acquire Drawable Command Buffer"));
+         const MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(signalSemaphore);
+-        acquireBuffer->enqueue();
+         acquireBuffer->encodeSignalEvent(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue);
+         acquireBuffer->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+-        acquireBuffer->commit();
++        commitMetalCommandBuffer(acquireBuffer);
+ 
+         drawable.desc.width = nextDrawable->texture()->width();
+         drawable.desc.height = nextDrawable->texture()->height();
+@@ -2419,7 +2485,7 @@
+ 
+     void MetalCommandList::commit() {
+         mtl->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+-        mtl->commit();
++        commitMetalCommandBuffer(mtl);
+         mtl->release();
+         mtl = nullptr;
+     }
+@@ -3799,7 +3865,6 @@
+         if (waitSemaphoreCount > 0) {
+             MTL::CommandBuffer* cmdBuffer = mtl->commandBufferWithUnretainedReferences();
+             cmdBuffer->setLabel(MTLSTR("Wait Command Buffer"));
+-            cmdBuffer->enqueue();
+ 
+             for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
+                 MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(waitSemaphores[i]);
+@@ -3807,7 +3872,7 @@
+             }
+ 
+             cmdBuffer->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+-            cmdBuffer->commit();
++            commitMetalCommandBuffer(cmdBuffer);
+         }
+ 
+         // Commit all command lists except the last one
+@@ -3817,13 +3882,11 @@
+ 
+             const MetalCommandList *interfaceCommandList = static_cast<const MetalCommandList *>(commandLists[i]);
+             MetalCommandList *mutableCommandList = const_cast<MetalCommandList*>(interfaceCommandList);
+-            mutableCommandList->mtl->enqueue();
+             mutableCommandList->commit();
+         }
+ 
+         // Use the last command list to mark the end and signal the fence
+         const MetalCommandList *interfaceCommandList = static_cast<const MetalCommandList *>(commandLists[commandListCount - 1]);
+-        interfaceCommandList->mtl->enqueue();
+ 
+         if (signalFence != nullptr) {
+             interfaceCommandList->mtl->addCompletedHandler([signalFence](MTL::CommandBuffer* cmdBuffer) {
+diff --git a/plume_metal_lifecycle.h b/plume_metal_lifecycle.h
+new file mode 100644
+--- /dev/null
++++ b/plume_metal_lifecycle.h
+@@ -0,0 +1,8 @@
++// Called on the UIKit main thread to stop/resume iOS GPU submissions.
++#pragma once
++
++namespace plume {
++    // Deactivation blocks future commits and schedules prior buffers on all
++    // queues before returning. Worker submissions wait until reactivation.
++    void setMetalAppActive(bool active);
++}

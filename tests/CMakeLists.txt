@@ -1,4 +1,7 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(APPLE)
+    enable_language(OBJC OBJCXX)
+endif()
 option(UNLEASHED_RECOMP_TEST_SANITIZERS "Enable address and undefined-behavior sanitizers in portable tests" OFF)
 if(UNLEASHED_RECOMP_TEST_SANITIZERS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -52,6 +55,67 @@ add_executable(launch_request_tests launch_request_tests.cpp)
 target_include_directories(launch_request_tests PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp")
 target_compile_options(launch_request_tests PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME ios_next_launch_request COMMAND launch_request_tests)
+
+set(KERNEL_SYNC_TEST_FLAGS)
+if(UNLEASHED_RECOMP_TEST_SANITIZERS)
+    list(APPEND KERNEL_SYNC_TEST_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+endif()
+add_test(NAME kernel_synchronization_release
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_kernel_synchronization.py"
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" ${KERNEL_SYNC_TEST_FLAGS})
+set_tests_properties(kernel_synchronization_release PROPERTIES TIMEOUT 60)
+add_test(NAME metal_drawable_presentation_release
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_metal_presentation.py"
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" ${KERNEL_SYNC_TEST_FLAGS})
+set_tests_properties(metal_drawable_presentation_release PROPERTIES TIMEOUT 60)
+add_test(NAME ios_execution_lifecycle_release
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ios_lifecycle.py"
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" ${KERNEL_SYNC_TEST_FLAGS})
+set_tests_properties(ios_execution_lifecycle_release PROPERTIES TIMEOUT 60)
+
+# Exercise the production input driver against SDL's virtual controller backend.
+# Disable unrelated host subsystems so this also runs in headless Linux CI.
+function(add_controller_input_tests)
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(SDL_SHARED OFF)
+    set(SDL_STATIC ON)
+    set(SDL_TEST OFF)
+    set(SDL_TESTS OFF)
+    set(SDL_AUDIO OFF)
+    set(SDL_VIDEO OFF)
+    set(SDL_RENDER OFF)
+    set(SDL_HAPTIC OFF)
+    # This SDL version makes its virtual driver depend on HIDAPI being enabled.
+    set(SDL_HIDAPI ON)
+    set(SDL_HIDAPI_JOYSTICK OFF)
+    set(SDL_VIRTUAL_JOYSTICK ON)
+    set(SDL_SENSOR OFF)
+    set(SDL_POWER OFF)
+    set(SDL_CCACHE OFF)
+    set(SDL2_DISABLE_INSTALL ON)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/thirdparty/SDL" "${CMAKE_CURRENT_BINARY_DIR}/input_sdl" EXCLUDE_FROM_ALL)
+    find_package(Threads REQUIRED)
+    add_executable(sdl_controller_input portable/sdl_controller_input.cpp
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/hid/driver/sdl_hid.cpp"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/hid/hid.cpp")
+    target_include_directories(sdl_controller_input PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/portable/input_stubs"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp" "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
+    target_compile_options(sdl_controller_input PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -UNDEBUG
+        -include "${CMAKE_CURRENT_SOURCE_DIR}/portable/input_stubs/stdafx.h")
+    target_compile_definitions(sdl_controller_input PRIVATE UNLEASHED_RECOMP_IOS)
+    target_link_libraries(sdl_controller_input PRIVATE SDL2::SDL2-static Threads::Threads)
+    if(APPLE)
+        target_sources(sdl_controller_input PRIVATE portable/ios_event_loop.mm
+            "${CMAKE_SOURCE_DIR}/UnleashedRecomp/ui/ios_event_loop.mm")
+        target_compile_options(sdl_controller_input PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+        target_compile_definitions(sdl_controller_input PRIVATE INPUT_TEST_IOS_LOOP UNLEASHED_RECOMP_METAL)
+        target_link_libraries(sdl_controller_input PRIVATE "-framework Foundation")
+    endif()
+    add_test(NAME sdl_controller_menu_input COMMAND sdl_controller_input)
+    set_tests_properties(sdl_controller_menu_input PROPERTIES TIMEOUT 30)
+endfunction()
+add_controller_input_tests()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(test_o1heap STATIC "${CMAKE_SOURCE_DIR}/thirdparty/o1heap/o1heap.c")
     target_include_directories(test_o1heap PUBLIC "${CMAKE_SOURCE_DIR}/thirdparty/o1heap")

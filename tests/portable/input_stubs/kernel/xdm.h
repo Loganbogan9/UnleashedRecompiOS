@@ -1,0 +1,4 @@
+#pragma once
+#define ERROR_SUCCESS 0x0
+#define ERROR_BAD_ARGUMENTS 0xA0
+#define ERROR_DEVICE_NOT_CONNECTED 0x48F

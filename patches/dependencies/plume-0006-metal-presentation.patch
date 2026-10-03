@@ -1,0 +1,260 @@
+diff --git a/plume_metal.cpp b/plume_metal.cpp
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -18,6 +18,7 @@
+ #include <mutex>
+ 
+ #include "plume_metal.h"
++#include "plume_metal_diagnostics.h"
+ 
+ extern "C" {
+     void *objc_autoreleasePoolPush(void);
+@@ -992,6 +993,40 @@
+         }
+     };
+ 
++    static std::atomic<MetalDiagnosticCallback> metalDiagnosticCallback{nullptr};
++
++    void setMetalDiagnosticCallback(MetalDiagnosticCallback callback) {
++        metalDiagnosticCallback.store(callback);
++    }
++
++    static void reportMetalDiagnostic(const char *message, bool error) {
++        if (auto callback = metalDiagnosticCallback.load()) {
++            callback(message, error);
++        } else {
++            fprintf(stderr, "%s\n", message);
++        }
++    }
++
++    static void reportMetalCommandBufferError(MTL::CommandBuffer *buffer) {
++        if (buffer->status() != MTL::CommandBufferStatusError) {
++            return;
++        }
++        static std::atomic<uint32_t> errorCount{0};
++        if (errorCount.fetch_add(1) >= 16) {
++            return;
++        }
++        MetalAutoreleasePool releasePool;
++        const NS::Error *error = buffer->error();
++        const NS::String *label = buffer->label();
++        const NS::String *description = error ? error->localizedDescription() : nullptr;
++        char message[768];
++        snprintf(message, sizeof(message), "Metal command buffer failed: label=%s, code=%lld, description=%s",
++            label ? label->utf8String() : "<unlabeled>",
++            error ? static_cast<long long>(error->code()) : 0,
++            description ? description->utf8String() : "<unavailable>");
++        reportMetalDiagnostic(message, true);
++    }
++
+     // MARK: - Helper Structures
+ 
+     MetalDescriptorSetLayout::MetalDescriptorSetLayout(MetalDevice *device, const RenderDescriptorSetDesc &desc) {
+@@ -2010,14 +2045,20 @@
+     }
+ 
+     bool MetalSwapChain::present(const uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, const uint32_t waitSemaphoreCount) {
+-        assert(layer != nullptr && "Cannot present without a valid layer.");
+-
+-        MetalAutoreleasePool releasePool;
+-        const MetalDrawable &drawable = drawables[textureIndex];
+-        assert(drawable.mtl != nullptr && "Cannot present without a valid drawable.");
++        if (layer == nullptr || textureIndex >= drawables.size() || drawables[textureIndex].mtl == nullptr) {
++            return false;
++        }
++
++        MetalAutoreleasePool releasePool;
++        MetalDrawable &drawable = drawables[textureIndex];
+ 
+         // Create a new command buffer just for presenting
+         MTL::CommandBuffer *presentBuffer = commandQueue->mtl->commandBufferWithUnretainedReferences();
++        if (presentBuffer == nullptr) {
++            drawable.mtl->release();
++            drawable.mtl = nullptr;
++            return false;
++        }
+         presentBuffer->setLabel(MTLSTR("Present Command Buffer"));
+         presentBuffer->enqueue();
+ 
+@@ -2028,25 +2069,35 @@
+ 
+         const uint64_t presentId = ++currentPresentId;
+ 
+-        // According to Apple, presenting via scheduled handler is more performant than using the presentDrawable method.
+-        // We grab the underlying drawable because we might've acquired a new one by now and the old one would have been released.
++        // Keep the drawable alive through GPU completion, but release the slot's
++        // reference after submission so it cannot exhaust CAMetalLayer's pool.
+         CA::MetalDrawable *drawableMtl = drawable.mtl->retain();
++        if (presentId <= 3) {
++            drawableMtl->addPresentedHandler([presentId](MTL::Drawable *displayed) {
++                char message[192];
++                snprintf(message, sizeof(message), "Metal drawable displayed: present=%llu, time=%.6f",
++                    static_cast<unsigned long long>(presentId), displayed->presentedTime());
++                reportMetalDiagnostic(message, false);
++            });
++        }
+         presentBuffer->addScheduledHandler([drawableMtl](MTL::CommandBuffer* cmdBuffer) {
+             drawableMtl->present();
+         });
+ 
+-        presentBuffer->addCompletedHandler([drawableMtl, presentId, this](MTL::CommandBuffer* cmdBuffer) {
+-            currentAvailableDrawableIndex = (currentAvailableDrawableIndex + 1) % MAX_DRAWABLES;
++        presentBuffer->addCompletedHandler([drawableMtl, presentId, state = presentState](MTL::CommandBuffer* cmdBuffer) {
++            reportMetalCommandBufferError(cmdBuffer);
+             drawableMtl->release();
+ 
+             {
+-                std::lock_guard lock(lastPresentedIdMutex);
+-                lastPresentedId = std::max(lastPresentedId, presentId);
+-            }
+-            lastPresentedIdCondVar.notify_all();
++                std::lock_guard lock(state->mutex);
++                state->lastCompletedId = std::max(state->lastCompletedId, presentId);
++            }
++            state->condition.notify_all();
+         });
+ 
+         presentBuffer->commit();
++        drawable.mtl->release();
++        drawable.mtl = nullptr;
+ 
+         return true;
+     }
+@@ -2054,9 +2105,9 @@
+     void MetalSwapChain::wait() {
+         MetalAutoreleasePool releasePool;
+         if (currentPresentId >= maxFrameLatency) {
+-            std::unique_lock lock(lastPresentedIdMutex);
+-            lastPresentedIdCondVar.wait_for(lock, std::chrono::seconds(1), [this] {
+-                return lastPresentedId >= currentPresentId - (maxFrameLatency - 1);
++            std::unique_lock lock(presentState->mutex);
++            presentState->condition.wait_for(lock, std::chrono::seconds(1), [this] {
++                return presentState->lastCompletedId >= currentPresentId - (maxFrameLatency - 1);
+             });
+         }
+     }
+@@ -2114,40 +2165,42 @@
+     }
+ 
+     bool MetalSwapChain::acquireTexture(RenderCommandSemaphore *signalSemaphore, uint32_t *textureIndex) {
+-        assert(signalSemaphore != nullptr);
+-        assert(textureIndex != nullptr);
+-        assert(*textureIndex < MAX_DRAWABLES);
+-
+-        // Create a command buffer just to encode the signal
+-        MetalAutoreleasePool releasePool;
++        if (layer == nullptr || width == 0 || height == 0 || signalSemaphore == nullptr || textureIndex == nullptr) {
++            return false;
++        }
++        MetalAutoreleasePool releasePool;
++        const uint32_t drawableIndex = currentAvailableDrawableIndex;
++        MetalDrawable &drawable = drawables[drawableIndex];
++        // Also retire an acquired drawable if the caller skipped presenting it.
++        if (drawable.mtl != nullptr) {
++            drawable.mtl->release();
++            drawable.mtl = nullptr;
++        }
++        CA::MetalDrawable *nextDrawable = layer->nextDrawable();
++        if (nextDrawable == nullptr) {
++            return false;
++        }
++
++        // A failed acquisition must not enqueue GPU work or change the semaphore
++        // sequence. Retry on the same slot when the layer provides a drawable.
+         MTL::CommandBuffer *acquireBuffer = commandQueue->mtl->commandBufferWithUnretainedReferences();
++        if (acquireBuffer == nullptr) {
++            return false;
++        }
+         acquireBuffer->setLabel(MTLSTR("Acquire Drawable Command Buffer"));
+         const MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(signalSemaphore);
+         acquireBuffer->enqueue();
+         acquireBuffer->encodeSignalEvent(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue);
++        acquireBuffer->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+         acquireBuffer->commit();
+ 
+-        CA::MetalDrawable *nextDrawable = layer->nextDrawable();
+-        if (nextDrawable == nullptr) {
+-            fprintf(stderr, "No more drawables available for rendering.\n");
+-            return false;
+-        }
+-
+-        // Set the texture index and drawable data
+-        *textureIndex = currentAvailableDrawableIndex;
+-        MetalDrawable &drawable = drawables[currentAvailableDrawableIndex];
+-        drawable.desc.width = width;
+-        drawable.desc.height = height;
++        drawable.desc.width = nextDrawable->texture()->width();
++        drawable.desc.height = nextDrawable->texture()->height();
+         drawable.desc.flags = RenderTextureFlag::RENDER_TARGET;
+         drawable.desc.format = mapRenderFormat(nextDrawable->texture()->pixelFormat());
+-        if (drawable.mtl) {
+-            // Release our reference before replacing.
+-            drawable.mtl->release();
+-        }
+-        drawable.mtl = nextDrawable;
+-
+-        drawable.mtl->retain();
+-
++        drawable.mtl = nextDrawable->retain();
++        *textureIndex = drawableIndex;
++        currentAvailableDrawableIndex = (drawableIndex + 1) % MAX_DRAWABLES;
+         return true;
+     }
+ 
+@@ -2365,6 +2418,7 @@
+     }
+ 
+     void MetalCommandList::commit() {
++        mtl->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+         mtl->commit();
+         mtl->release();
+         mtl = nullptr;
+@@ -3752,6 +3806,7 @@
+                 cmdBuffer->encodeWait(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue++);
+             }
+ 
++            cmdBuffer->addCompletedHandler([](MTL::CommandBuffer *buffer) { reportMetalCommandBufferError(buffer); });
+             cmdBuffer->commit();
+         }
+ 
+diff --git a/plume_metal.h b/plume_metal.h
+--- a/plume_metal.h
++++ b/plume_metal.h
+@@ -243,6 +243,7 @@
+         uint32_t height = 0;
+         uint32_t refreshRate = 0;
+         std::vector<MetalDrawable> drawables;
++        // Only the acquire/present caller advances slots; GPU callbacks never touch them.
+         uint32_t currentAvailableDrawableIndex = 0;
+         RenderWindow renderWindow = {};
+         std::unique_ptr<CocoaWindow> windowWrapper;
+@@ -250,9 +251,13 @@
+         // Present wait
+         uint32_t maxFrameLatency = 0;
+         uint64_t currentPresentId = 0;
+-        uint64_t lastPresentedId = 0;
+-        std::mutex lastPresentedIdMutex;
+-        std::condition_variable lastPresentedIdCondVar;
++        struct PresentState {
++            uint64_t lastCompletedId = 0;
++            std::mutex mutex;
++            std::condition_variable condition;
++        };
++        // Completion handlers may outlive the swapchain itself.
++        std::shared_ptr<PresentState> presentState = std::make_shared<PresentState>();
+ 
+         MetalSwapChain(MetalCommandQueue *commandQueue, RenderWindow renderWindow, uint32_t textureCount, RenderFormat format, uint32_t maxFrameLatency);
+         ~MetalSwapChain() override;
+diff --git a/plume_metal_diagnostics.h b/plume_metal_diagnostics.h
+new file mode 100644
+--- /dev/null
++++ b/plume_metal_diagnostics.h
+@@ -0,0 +1,8 @@
++// Metal diagnostics can be routed to the application's persistent log.
++#pragma once
++
++namespace plume {
++    using MetalDiagnosticCallback = void (*)(const char *message, bool error);
++    // The callback can run on a Metal driver thread and must be thread-safe.
++    void setMetalDiagnosticCallback(MetalDiagnosticCallback callback);
++}

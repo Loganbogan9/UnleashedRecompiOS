@@ -100,6 +100,22 @@ public:
                 break;
             }
 
+            case SDL_FINGERDOWN:
+            case SDL_FINGERMOTION:
+            {
+                auto& io = ImGui::GetIO();
+                io.MousePos = {
+                    event->tfinger.x * io.DisplaySize.x,
+                    event->tfinger.y * io.DisplaySize.y
+                };
+                hid::g_inputDevice = hid::EInputDevice::Mouse;
+
+                if (event->type == SDL_FINGERDOWN)
+                    g_isAccepted = true;
+
+                break;
+            }
+
             case SDL_CONTROLLERBUTTONDOWN:
             {
                 switch (event->cbutton.button)

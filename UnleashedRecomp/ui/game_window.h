@@ -3,6 +3,7 @@
 #include <plume_render_interface_types.h>
 #include <user/config.h>
 #include <sdl_events.h>
+#include <atomic>
 
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
@@ -20,7 +21,7 @@ public:
     static inline int s_width = DEFAULT_WIDTH;
     static inline int s_height = DEFAULT_HEIGHT;
 
-    static inline bool s_isFocused;
+    static inline std::atomic<bool> s_isFocused;
     static inline bool s_isIconNight;
     static inline bool s_isFullscreenCursorVisible;
     static inline bool s_isChangingDisplay;

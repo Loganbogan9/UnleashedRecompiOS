@@ -60,7 +60,8 @@ struct Event final : KernelObject, HostObject<XKEVENT>
                 while (true)
                 {
                     bool expected = true;
-                    if (signaled.compare_exchange_weak(expected, false))
+                    // A spurious failure must not put us to sleep on a signaled event.
+                    if (signaled.compare_exchange_strong(expected, false))
                         break;
 
                     signaled.wait(expected);
@@ -635,7 +636,9 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     {
         uint32_t previousOwner = 0;
 
-        if (owningThread.compare_exchange_weak(previousOwner, thisThread) || previousOwner == thisThread)
+        // Only wait after observing a real owner. A weak CAS can fail with
+        // previousOwner == 0 on ARM, leaving nobody to release/notify the lock.
+        if (owningThread.compare_exchange_strong(previousOwner, thisThread) || previousOwner == thisThread)
         {
             cs->RecursionCount++;
             return;
@@ -1143,7 +1146,8 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
     uint32_t previousOwner = 0;
 
-    if (owningThread.compare_exchange_weak(previousOwner, thisThread) || previousOwner == thisThread)
+    // Do not report contention when a free lock's exclusive store fails spuriously.
+    if (owningThread.compare_exchange_strong(previousOwner, thisThread) || previousOwner == thisThread)
     {
         cs->RecursionCount++;
         return true;

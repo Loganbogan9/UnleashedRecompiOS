@@ -6,9 +6,19 @@
 #include <ui/game_window.h>
 #include <kernel/xdm.h>
 #include <app.h>
+#include <atomic>
 
 #define TRANSLATE_INPUT(S, X) SDL_GameControllerGetButton(controller, S) << FirstBitLow(X)
 #define VIBRATION_TIMEOUT_MS 5000
+
+// SDL delivers controller events under this recursive lock. Guest input reads
+// must share it now that iOS pumps events separately on UIKit's main thread.
+class JoystickLock
+{
+public:
+    JoystickLock() { SDL_LockJoysticks(); }
+    ~JoystickLock() { SDL_UnlockJoysticks(); }
+};
 
 class Controller
 {
@@ -77,6 +87,8 @@ public:
         controller = nullptr;
         joystick = nullptr;
         id = -1;
+        state = {};
+        vibration = {};
     }
 
     bool CanPoll()
@@ -149,6 +161,7 @@ public:
 
 std::array<Controller, 4> g_controllers;
 Controller* g_activeController;
+static std::atomic<int> g_pendingControllerLED{ -1 };
 
 inline Controller* EnsureController(uint32_t dwUserIndex)
 {
@@ -224,13 +237,26 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
     {
         case SDL_CONTROLLERDEVICEADDED:
         {
+            const JoystickLock lock;
             const auto freeIndex = FindFreeController();
 
             if (freeIndex != -1)
             {
                 auto controller = Controller(event->cdevice.which);
+                if (!controller.CanPoll())
+                {
+                    LOGFN_ERROR("Failed to open controller: {}", SDL_GetError());
+                    break;
+                }
 
                 g_controllers[freeIndex] = controller;
+                auto& connectedController = g_controllers[freeIndex];
+                connectedController.Poll();
+                connectedController.PollAxis();
+                if (!g_activeController)
+                    SetControllerInputDevice(&connectedController);
+
+                LOGFN("Opened controller {}: {}", freeIndex, controller.GetControllerName());
 
                 SetControllerTimeOfDayLED(controller, App::s_isWerehog);
             }
@@ -240,10 +266,15 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
 
         case SDL_CONTROLLERDEVICEREMOVED:
         {
+            const JoystickLock lock;
             auto* controller = FindController(event->cdevice.which);
 
             if (controller)
+            {
+                if (g_activeController == controller)
+                    g_activeController = nullptr;
                 controller->Close();
+            }
 
             break;
         }
@@ -253,6 +284,7 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
         case SDL_CONTROLLERAXISMOTION:
         case SDL_CONTROLLERTOUCHPADDOWN:
         {
+            const JoystickLock lock;
             auto* controller = FindController(event->cdevice.which);
 
             if (!controller)
@@ -300,6 +332,7 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
         {
             if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
             {
+                const JoystickLock lock;
                 // Stop vibrating controllers on focus lost.
                 for (auto& controller : g_controllers)
                     controller.SetVibration({ 0, 0 });
@@ -310,8 +343,15 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
 
         case SDL_USER_EVILSONIC:
         {
+#if defined(UNLEASHED_RECOMP_IOS)
+            // A guest-thread SDL_PushEvent holds SDL's event-watch lock. Taking
+            // the joystick lock here would invert the main-thread poll order.
+            g_pendingControllerLED = event->user.code != 0;
+#else
+            const JoystickLock lock;
             for (auto& controller : g_controllers)
                 SetControllerTimeOfDayLED(controller, event->user.code);
+#endif
 
             break;
         }
@@ -338,11 +378,28 @@ void hid::Init()
     SDL_InitSubSystem(SDL_INIT_EVENTS);
     SDL_AddEventWatch(HID_OnSDLEvent, nullptr);
 
-    SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+        LOGFN_ERROR("Failed to initialize controllers: {}", SDL_GetError());
+}
+
+void hid::Update()
+{
+    const int isNight = g_pendingControllerLED.exchange(-1);
+    if (isNight == -1)
+        return;
+
+    // Called after pumping events, outside SDL's event-watch lock.
+    const JoystickLock lock;
+    for (auto& controller : g_controllers)
+    {
+        if (controller.CanPoll())
+            SetControllerTimeOfDayLED(controller, isNight != 0);
+    }
 }
 
 uint32_t hid::GetState(uint32_t dwUserIndex, XAMINPUT_STATE* pState)
 {
+    const JoystickLock lock;
     static uint32_t packet;
 
     if (!pState)
@@ -362,6 +419,7 @@ uint32_t hid::GetState(uint32_t dwUserIndex, XAMINPUT_STATE* pState)
 
 uint32_t hid::SetState(uint32_t dwUserIndex, XAMINPUT_VIBRATION* pVibration)
 {
+    const JoystickLock lock;
     if (!pVibration)
         return ERROR_BAD_ARGUMENTS;
 
@@ -375,6 +433,7 @@ uint32_t hid::SetState(uint32_t dwUserIndex, XAMINPUT_VIBRATION* pVibration)
 
 uint32_t hid::GetCapabilities(uint32_t dwUserIndex, XAMINPUT_CAPABILITIES* pCaps)
 {
+    const JoystickLock lock;
     if (!pCaps)
         return ERROR_BAD_ARGUMENTS;
 

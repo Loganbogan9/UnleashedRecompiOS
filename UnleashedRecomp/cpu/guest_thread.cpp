@@ -4,6 +4,7 @@
 #include <kernel/heap.h>
 #include <kernel/function.h>
 #include <os/logger.h>
+#include <os/app_lifecycle.h>
 #include "ppc_context.h"
 #include <new>
 #include <system_error>
@@ -204,6 +205,9 @@ uint32_t GuestThread::Start(const GuestThreadParams& params)
 
     auto* function = g_memory.FindFunction(params.function);
     LOGFN("GuestThread::Start resolved host function - guest: 0x{:08X}, host: {}", params.function, reinterpret_cast<void*>(function));
+#if defined(UNLEASHED_RECOMP_IOS)
+    app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
     function(ctx.ppcContext, g_memory.base);
 
     LOGFN("GuestThread::Start end - function: 0x{:08X}, r3: 0x{:08X}", params.function, ctx.ppcContext.r3.u32);

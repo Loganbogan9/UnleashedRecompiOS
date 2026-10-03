@@ -32,6 +32,10 @@
 #include <preload_executable.h>
 #include <SDL.h>
 
+#if defined(UNLEASHED_RECOMP_IOS)
+#include <ui/ios_event_loop.h>
+#endif
+
 #ifdef _WIN32
 #include <timeapi.h>
 #endif
@@ -422,7 +426,25 @@ int main(int argc, char *argv[])
     os::logger::LogRuntimeDiagnostics("pipeline precompilation launched; entering guest");
 
     LOGFN("Starting guest thread at entry: 0x{:08X}", entry);
+#if defined(UNLEASHED_RECOMP_IOS)
+    if (!StartIOSEventLoop())
+    {
+        LOGFN_ERROR("Failed to start the iOS event loop: {}", SDL_GetError());
+        std::_Exit(1);
+    }
+    LOGN("iOS main-thread event loop started.");
+
+    // Keep UIKit's main run loop available while the guest entry waits on guest synchronization objects.
+    static GuestThreadHandle* guestMainThread = nullptr;
+    guestMainThread = GuestThread::Start({ entry, 0, 0 }, nullptr);
+    if (guestMainThread == nullptr)
+    {
+        LOGN_ERROR("Failed to start the guest main thread.");
+        std::_Exit(1);
+    }
+#else
     GuestThread::Start({ entry, 0, 0 });
+#endif
 
     return 0;
 }

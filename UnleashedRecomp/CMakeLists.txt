@@ -201,8 +201,9 @@ set(UNLEASHED_RECOMP_UI_CXX_SOURCES
 )
 
 if (UNLEASHED_RECOMP_IOS)
-    list(APPEND UNLEASHED_RECOMP_UI_CXX_SOURCES "ui/ios_file_picker.mm")
-    set_source_files_properties(ui/ios_file_picker.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    list(APPEND UNLEASHED_RECOMP_UI_CXX_SOURCES "ui/ios_file_picker.mm" "ui/ios_event_loop.mm")
+    set_source_files_properties(ui/ios_file_picker.mm ui/ios_event_loop.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(ui/ios_event_loop.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endif()
 
 set(UNLEASHED_RECOMP_INSTALL_CXX_SOURCES
@@ -401,6 +402,26 @@ elseif (APPLE AND NOT UNLEASHED_RECOMP_IOS)
     add_dependencies(CopyMoltenVK MoltenVK)
     add_dependencies(UnleashedRecomp CopyMoltenVK)
 elseif (UNLEASHED_RECOMP_IOS)
+    include(FetchContent)
+    set(ASTCENC_CLI OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_UNIVERSAL_BUILD OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_ISA_NEON ON CACHE BOOL "" FORCE)
+    set(ASTCENC_ISA_NATIVE OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_WERROR OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(astcenc
+        GIT_REPOSITORY https://github.com/ARM-software/astc-encoder.git
+        GIT_TAG 5.4.0
+        GIT_SHALLOW FALSE
+    )
+    FetchContent_MakeAvailable(astcenc)
+
+    FetchContent_Declare(bc7enc
+        GIT_REPOSITORY https://github.com/richgel999/bc7enc.git
+        GIT_TAG f66c2e489b07138f2673a2fb3d27c1aa1d565c48
+        GIT_SHALLOW FALSE
+    )
+    FetchContent_Populate(bc7enc)
+
     CreateVersionString(
         VERSION_TXT ${VERSION_TXT}
         OUTPUT_CSV 1
@@ -409,6 +430,9 @@ elseif (UNLEASHED_RECOMP_IOS)
     string(REPLACE "," "." IOS_BUNDLE_VERSION "${IOS_BUNDLE_VERSION}")
 
     add_executable(UnleashedRecomp MACOSX_BUNDLE ${UNLEASHED_RECOMP_CXX_SOURCES})
+    target_include_directories(UnleashedRecomp PRIVATE "${bc7enc_SOURCE_DIR}" "${astcenc_SOURCE_DIR}/Source")
+    target_sources(UnleashedRecomp PRIVATE "${bc7enc_SOURCE_DIR}/bc7decomp.cpp")
+    target_link_libraries(UnleashedRecomp PRIVATE astcenc-neon-static)
 
     set(UNLEASHED_RECOMP_IOS_ASSET_CATALOG ${CMAKE_CURRENT_SOURCE_DIR}/res/ios/Assets.xcassets)
     set_source_files_properties(${UNLEASHED_RECOMP_IOS_ASSET_CATALOG} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)

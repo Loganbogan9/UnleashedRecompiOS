@@ -6,6 +6,11 @@
 
 #include <climits>
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#include "astc_cache.h"
+#include <bc7decomp.h>
+#endif
+
 #include "imgui/imgui_common.h"
 #include "imgui/imgui_snapshot.h"
 #include "imgui/imgui_font_builder.h"
@@ -38,8 +43,16 @@
 #include <user/paths.h>
 #include <sdl_listener.h>
 #include <xxHashMap.h>
+
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
 #include <os/logger.h>
+#include <os/app_lifecycle.h>
 #include <os/process.h>
+#ifdef UNLEASHED_RECOMP_METAL
+#include <plume_metal_diagnostics.h>
+#endif
 
 #include <cstdlib>
 
@@ -830,6 +843,7 @@ static void DestructTempResources()
 }
 
 static std::thread::id g_presentThreadId = std::this_thread::get_id();
+static std::thread::id g_mainThreadId = std::this_thread::get_id();
 static std::atomic<bool> g_readyForCommands;
 
 PPC_FUNC_IMPL(__imp__sub_824ECA00);
@@ -1641,6 +1655,11 @@ static void CreateImGuiBackend()
 static void CheckSwapChain()
 {
     static uint64_t s_installerInvalidCounter = 0;
+#if defined(UNLEASHED_RECOMP_IOS)
+    static uint64_t failedAcquisitions = 0;
+    static std::chrono::steady_clock::time_point lastFailureLog;
+    static bool loggedFirstDrawable = false;
+#endif
 
     g_swapChain->setVsyncEnabled(Config::VSync);
     const bool needsResize = g_swapChain->needsResize();
@@ -1667,6 +1686,29 @@ static void CheckSwapChain()
         g_swapChainValid = g_swapChain->acquireTexture(g_acquireSemaphores[g_frame].get(), &g_backBufferIndex);
         g_swapChainAcquireProfiler.End();
     }
+
+#if defined(UNLEASHED_RECOMP_IOS)
+    if (!g_swapChainValid)
+    {
+        ++failedAcquisitions;
+        const auto now = std::chrono::steady_clock::now();
+        if (failedAcquisitions == 1 || now - lastFailureLog >= std::chrono::seconds(5))
+        {
+            LOGFN_ERROR("iOS drawable unavailable: attempts={}, size={}x{}, empty={}, focused={}, needsResize={}",
+                failedAcquisitions, g_swapChain->getWidth(), g_swapChain->getHeight(),
+                g_swapChain->isEmpty(), GameWindow::s_isFocused.load(), needsResize);
+            lastFailureLog = now;
+        }
+    }
+    else
+    {
+        if (!loggedFirstDrawable || failedAcquisitions != 0)
+            LOGFN("iOS drawable acquired: index={}, size={}x{}, priorFailures={}",
+                g_backBufferIndex, g_swapChain->getWidth(), g_swapChain->getHeight(), failedAcquisitions);
+        loggedFirstDrawable = true;
+        failedAcquisitions = 0;
+    }
+#endif
 
     if (InstallerWizard::s_isVisible && !g_swapChainValid)
     {
@@ -1801,6 +1843,11 @@ static void ApplyIOSMetalHUDConfig()
 
 bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
 {
+#ifdef UNLEASHED_RECOMP_METAL
+    plume::setMetalDiagnosticCallback([](const char *message, bool error) {
+        os::logger::Log(message, error ? os::logger::ELogType::Error : os::logger::ELogType::None);
+    });
+#endif
     for (uint32_t i = 0; i < 16; i++)
         g_inputSlots[i].index = i;
 
@@ -2788,7 +2835,14 @@ static void DrawIOSLowMemoryWarning()
 
 static void DrawImGui()
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    if (std::this_thread::get_id() == g_mainThreadId)
+        ImGui_ImplSDL2_NewFrame();
+    else
+        dispatch_sync_f(dispatch_get_main_queue(), nullptr, [](void*) { ImGui_ImplSDL2_NewFrame(); });
+#else
     ImGui_ImplSDL2_NewFrame();
+#endif
 
     auto& io = ImGui::GetIO();
     io.DisplaySize = { float(Video::s_viewportWidth), float(Video::s_viewportHeight) };
@@ -3044,6 +3098,9 @@ static std::atomic<bool> g_executedCommandList;
 
 void Video::Present() 
 {
+#if defined(UNLEASHED_RECOMP_IOS)
+    app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
     static std::atomic<uint32_t> s_presentLogCount = 0;
     const uint32_t presentLogIndex = s_presentLogCount.fetch_add(1);
     const bool logPresent = presentLogIndex < 4;
@@ -5591,6 +5648,10 @@ static std::thread g_renderThread([]
         {
             size_t count = g_renderQueue.wait_dequeue_bulk(commands, std::size(commands));
 
+#if defined(UNLEASHED_RECOMP_IOS)
+            app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
+
             for (size_t i = 0; i < count; i++)
             {
                 auto& cmd = commands[i];
@@ -6113,11 +6174,113 @@ static bool DecodeBCToRGBA8Mip0(const uint8_t* data, size_t dataSize, const ddsp
     else if (IsBC3Format(format)) blockFormat = BlockCompression::Format::BC3;
     else if (IsBC4Format(format)) blockFormat = BlockCompression::Format::BC4;
     else if (IsBC5Format(format)) blockFormat = BlockCompression::Format::BC5;
+    else if (IsBC7Format(format))
+    {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        const size_t blocksX = ddsDesc.width / 4 + (ddsDesc.width % 4 != 0);
+        const size_t blocksY = ddsDesc.height / 4 + (ddsDesc.height % 4 != 0);
+        if (blocksX == 0 || blocksY > (dataSize - ddsDesc.headerSize) / 16 ||
+            blocksX > (dataSize - ddsDesc.headerSize) / 16 / blocksY)
+            return false;
+        if (size_t(ddsDesc.width) > std::numeric_limits<size_t>::max() / ddsDesc.height / 4)
+            return false;
+
+        outRGBA.assign(size_t(ddsDesc.width) * ddsDesc.height * 4, 0);
+        const uint8_t* blocks = data + ddsDesc.headerSize;
+        for (uint32_t by = 0; by < blocksY; by++)
+        {
+            for (uint32_t bx = 0; bx < blocksX; bx++)
+            {
+                bc7decomp::color_rgba pixels[16];
+                if (!bc7decomp::unpack_bc7(blocks + (size_t(by) * blocksX + bx) * 16, pixels))
+                    return false;
+
+                for (uint32_t py = 0; py < 4; py++)
+                {
+                    for (uint32_t px = 0; px < 4; px++)
+                    {
+                        const uint32_t x = bx * 4 + px;
+                        const uint32_t y = by * 4 + py;
+                        if (x >= ddsDesc.width || y >= ddsDesc.height)
+                            continue;
+                        memcpy(&outRGBA[(size_t(y) * ddsDesc.width + x) * 4], &pixels[py * 4 + px], 4);
+                    }
+                }
+            }
+        }
+        return true;
+#else
+        return false;
+#endif
+    }
     else return false;
 
     return BlockCompression::DecodeMip(std::span(data + ddsDesc.headerSize, dataSize - ddsDesc.headerSize),
         ddsDesc.width, ddsDesc.height, blockFormat, outRGBA);
 }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+static bool UploadASTCCacheTexture(GuestTexture& texture, uint32_t width, uint32_t height, RenderFormat format,
+    std::span<const uint8_t> astcData, RenderComponentMapping componentMapping)
+{
+    const uint32_t blockWidth = format == RenderFormat::ASTC_6x6_UNORM || format == RenderFormat::ASTC_6x6_UNORM_SRGB ? 6 : 4;
+    ddspp::Descriptor descriptor{};
+    descriptor.width = width;
+    descriptor.height = height;
+    descriptor.depth = 1;
+    descriptor.numMips = 1;
+    descriptor.arraySize = 1;
+    descriptor.type = ddspp::Texture2D;
+    descriptor.blockWidth = blockWidth;
+    descriptor.blockHeight = blockWidth;
+    descriptor.bitsPerPixelOrBlock = 128;
+
+    DdsUploadLayout layout;
+    if (!BuildDdsUploadLayout(descriptor, astcData.size(), PITCH_ALIGNMENT, PLACEMENT_ALIGNMENT, layout))
+        return false;
+
+    texture.textureHolder = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, format));
+    texture.texture = texture.textureHolder.get();
+    texture.viewDimension = RenderTextureViewDimension::TEXTURE_2D;
+    texture.layout = RenderTextureLayout::COPY_DEST;
+    texture.format = format;
+
+    RenderTextureViewDesc viewDesc;
+    viewDesc.format = format;
+    viewDesc.dimension = texture.viewDimension;
+    viewDesc.mipLevels = 1;
+    viewDesc.componentMapping = componentMapping;
+    texture.textureView = texture.texture->createTextureView(viewDesc);
+    texture.descriptorIndex = g_textureDescriptorAllocator.allocate();
+    g_textureDescriptorSet->setTexture(texture.descriptorIndex, texture.texture, RenderTextureLayout::SHADER_READ, texture.textureView.get());
+
+    auto uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(layout.uploadSize));
+    uint8_t* mappedMemory = reinterpret_cast<uint8_t*>(uploadBuffer->map());
+    const auto& slice = layout.slices.front();
+    const uint8_t* source = astcData.data();
+    uint8_t* destination = mappedMemory + slice.dstOffset;
+    for (uint32_t row = 0; row < slice.rowCount; row++)
+    {
+        memcpy(destination, source, slice.srcRowPitch);
+        source += slice.srcRowPitch;
+        destination += slice.dstRowPitch;
+    }
+    uploadBuffer->unmap();
+
+    ExecuteCopyCommandList([&]
+        {
+            g_copyCommandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(texture.texture, RenderTextureLayout::COPY_DEST));
+            g_copyCommandList->copyTextureRegion(
+                RenderTextureCopyLocation::Subresource(texture.texture, 0, 0),
+                RenderTextureCopyLocation::PlacedFootprint(uploadBuffer.get(), format, width, height, 1,
+                    slice.rowWidth, slice.dstOffset));
+        });
+
+    texture.width = width;
+    texture.height = height;
+    return true;
+}
+#endif
 
 static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataSize, RenderComponentMapping componentMapping, bool forceCubeMap = false, std::string_view sourceName = {})
 {
@@ -6154,6 +6317,21 @@ static bool LoadTexture(GuestTexture& texture, const uint8_t* data, size_t dataS
         if (IsBCFormat(desc.format))
         {
             const uint64_t textureHash = HashTextureData(data, dataSize);
+
+            const bool cacheable = desc.format == RenderFormat::BC3_UNORM || desc.format == RenderFormat::BC3_UNORM_SRGB ||
+                desc.format == RenderFormat::BC7_UNORM || desc.format == RenderFormat::BC7_UNORM_SRGB;
+            if (cacheable)
+            {
+                const RenderFormat astcFormat = desc.format == RenderFormat::BC3_UNORM_SRGB || desc.format == RenderFormat::BC7_UNORM_SRGB
+                    ? RenderFormat::ASTC_6x6_UNORM_SRGB : RenderFormat::ASTC_6x6_UNORM;
+                std::vector<uint8_t> astcData;
+                if (LoadASTCCache(GetGamePath(), textureHash, desc.width, desc.height, uint32_t(astcFormat), astcData) &&
+                    UploadASTCCacheTexture(texture, desc.width, desc.height, astcFormat, astcData, componentMapping))
+                {
+                    os::logger::Log(fmt::format("LoadTexture iOS ASTC cache hit: {:016X} ({}x{})", textureHash, desc.width, desc.height));
+                    return true;
+                }
+            }
 
             {
                 std::vector<uint8_t> overrideData;
@@ -6892,6 +7070,10 @@ static void PipelineCompilerThread()
         PipelineStateQueueItem queueItem;
         g_pipelineStateQueue.wait_dequeue(queueItem);
 
+#if defined(UNLEASHED_RECOMP_IOS)
+        app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
+
         if (ctx == nullptr)
             ctx = std::make_unique<GuestThreadContext>(0);
 
@@ -7552,7 +7734,6 @@ static void CompileParticleMaterialPipeline(const Hedgehog::Sparkle::CParticleMa
     }
 }
 
-static std::thread::id g_mainThreadId = std::this_thread::get_id();
 static std::vector<uint16_t*> g_newIndicesToFree;
 
 static void FreePendingConvertedIndices()
@@ -7567,7 +7748,9 @@ static void FreePendingConvertedIndices()
 PPC_FUNC_IMPL(__imp__sub_825369A0);
 PPC_FUNC(sub_825369A0)
 {
+#if !defined(__APPLE__) || !TARGET_OS_IPHONE
     assert(std::this_thread::get_id() == g_mainThreadId);
+#endif
 
     // Wait for pipeline compilations to finish.
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -7583,10 +7766,12 @@ PPC_FUNC(sub_825369A0)
     uint32_t value;
     while ((value = g_compilingPipelineTaskCount.load()) != 0)
     {
+    #if !defined(__APPLE__) || !TARGET_OS_IPHONE
         // Pump SDL events to prevent the OS
         // from thinking the process is unresponsive.
         SDL_PumpEvents();
         SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    #endif
 
 #if defined(__APPLE__) && TARGET_OS_IOS
         // atomic::wait has no timeout and the task counter only notifies when
@@ -7793,6 +7978,10 @@ static void PipelineTaskConsumerThread()
         uint32_t pendingPipelineTaskCount;
         while ((pendingPipelineTaskCount = g_pendingPipelineTaskCount.load()) == 0)
             g_pendingPipelineTaskCount.wait(pendingPipelineTaskCount);
+
+#if defined(UNLEASHED_RECOMP_IOS)
+        app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
 
         if (ctx == nullptr)
             ctx = std::make_unique<GuestThreadContext>(0);

@@ -10,6 +10,8 @@
 void XAudioInitializeSystem();
 void XAudioRegisterClient(PPCFunc* callback, uint32_t param);
 void XAudioSubmitFrame(void* samples);
+// Stops queued output and discards stale audio across iOS activation changes.
+void XAudioSetAppActive(bool active);
 
 uint32_t XAudioRegisterRenderDriverClient(be<uint32_t>* callback, be<uint32_t>* driver);
 uint32_t XAudioUnregisterRenderDriverClient(uint32_t driver);

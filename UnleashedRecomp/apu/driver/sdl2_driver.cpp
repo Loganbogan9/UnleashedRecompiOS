@@ -2,15 +2,19 @@
 #include <cpu/guest_thread.h>
 #include <kernel/heap.h>
 #include <os/logger.h>
+#include <os/app_lifecycle.h>
 #include <user/config.h>
 
 static PPCFunc* g_clientCallback{};
 static uint32_t g_clientCallbackParam{}; // pointer in guest memory
 static SDL_AudioDeviceID g_audioDevice{};
 static bool g_downMixToStereo;
+static std::mutex g_audioDeviceMutex;
+static bool g_audioAppActive = true;
 
 static void CreateAudioDevice()
 {
+    std::lock_guard lock(g_audioDeviceMutex);
     if (g_audioDevice != NULL)
         SDL_CloseAudioDevice(g_audioDevice);
 
@@ -68,7 +72,14 @@ static void AudioThread()
 
     while (!g_audioThreadShouldExit)
     {
-        uint32_t queuedAudioSize = SDL_GetQueuedAudioSize(g_audioDevice);
+#if defined(UNLEASHED_RECOMP_IOS)
+        app_lifecycle::GetExecutionGate().WaitUntilActive();
+#endif
+        uint32_t queuedAudioSize;
+        {
+            std::lock_guard lock(g_audioDeviceMutex);
+            queuedAudioSize = SDL_GetQueuedAudioSize(g_audioDevice);
+        }
         constexpr size_t MAX_LATENCY = 10;
         const size_t callbackAudioSize = channels * XAUDIO_NUM_SAMPLES * sizeof(float);
 
@@ -91,7 +102,10 @@ static void AudioThread()
 
 static void CreateAudioThread()
 {
-    SDL_PauseAudioDevice(g_audioDevice, 0);
+    {
+        std::lock_guard lock(g_audioDeviceMutex);
+        SDL_PauseAudioDevice(g_audioDevice, !g_audioAppActive);
+    }
     g_audioThreadShouldExit = false;
     g_audioThread = std::make_unique<std::thread>(AudioThread);
 }
@@ -105,6 +119,26 @@ void XAudioRegisterClient(PPCFunc* callback, uint32_t param)
     g_clientCallback = callback;
 
     CreateAudioThread();
+}
+
+void XAudioSetAppActive(bool active)
+{
+    std::lock_guard lock(g_audioDeviceMutex);
+    g_audioAppActive = active;
+    if (g_audioDevice)
+    {
+        SDL_PauseAudioDevice(g_audioDevice, !active);
+        SDL_ClearQueuedAudio(g_audioDevice);
+    }
+}
+
+static void QueueAudioFrames(const void* samples, size_t size)
+{
+    std::lock_guard lock(g_audioDeviceMutex);
+    // A callback already in progress may finish after deactivation. Do not
+    // leave its output queued to play on the next foreground activation.
+    if (g_audioAppActive)
+        SDL_QueueAudio(g_audioDevice, samples, static_cast<uint32_t>(size));
 }
 
 void XAudioSubmitFrame(void* samples)
@@ -135,7 +169,7 @@ void XAudioSubmitFrame(void* samples)
             audioFrames[i * 2 + 1] = (ch1 + ch2 * 0.75f + ch5) * Config::MasterVolume;
         }
 
-        SDL_QueueAudio(g_audioDevice, &audioFrames, sizeof(audioFrames));
+        QueueAudioFrames(&audioFrames, sizeof(audioFrames));
     }
     else
     {
@@ -147,6 +181,6 @@ void XAudioSubmitFrame(void* samples)
                 audioFrames[i * XAUDIO_NUM_CHANNELS + j] = floatSamples[j * XAUDIO_NUM_SAMPLES + i] * Config::MasterVolume;
         }
 
-        SDL_QueueAudio(g_audioDevice, &audioFrames, sizeof(audioFrames));
+        QueueAudioFrames(&audioFrames, sizeof(audioFrames));
     }
 }

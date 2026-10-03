@@ -288,7 +288,7 @@ Simply booting at least once in Desktop Mode will enable the Deck to use the fil
 
 ### Broken Textures on iOS
 
-The iOS fallback decodes supported BC1–BC5 textures on the CPU. BC7 still requires a preconverted override on devices where the current backend cannot use it. Missing textures are dumped under `UnleashedRecomp/bc7_dump` using the texture hash as the filename; convert them to a supported format such as BC3 and place them under `UnleashedRecomp/bc7_override`. Signed BC4/BC5 and complete fallback mip-chain handling remain areas for further validation.
+The iOS fallback decodes BC1–BC5 and BC7 textures on the CPU into an iOS-friendly RGBA8 texture when the backend cannot sample the original compression format. BC7 textures are still dumped under `UnleashedRecomp/bc7_dump` using the texture hash as the filename for diagnostics; preconverted files in `UnleashedRecomp/bc7_override` remain supported. Signed BC4/BC5 and complete fallback mip-chain handling remain areas for further validation.
 
 ### iOS crashes after repeated gameplay sessions
 
