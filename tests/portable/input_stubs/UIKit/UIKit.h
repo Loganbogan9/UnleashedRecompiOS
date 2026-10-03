@@ -1,5 +1,15 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import <QuartzCore/CADisplayLink.h>
+
+@interface UIScreen : NSObject
+@property NSInteger maximumFramesPerSecond;
+- (CADisplayLink*)displayLinkWithTarget:(id)target selector:(SEL)selector;
+@end
+
+@interface UIWindow : NSObject
+@property(strong) UIScreen* screen;
+@end
 
 typedef NS_ENUM(NSInteger, UIApplicationState) {
     UIApplicationStateActive,

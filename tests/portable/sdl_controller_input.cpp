@@ -55,16 +55,44 @@ int main()
     assert(hid::GetState(0, nullptr) == ERROR_BAD_ARGUMENTS);
     XAMINPUT_STATE state{};
     assert(hid::GetState(0, &state) == ERROR_DEVICE_NOT_CONNECTED);
+    assert(!hid::HasConnectedController());
+    XAMINPUT_GAMEPAD touch{};
+    touch.wButtons = XAMINPUT_GAMEPAD_START | XAMINPUT_GAMEPAD_A;
+    touch.sThumbLX = 19000;
+    touch.sThumbRY = -12000;
+    hid::SetTouchControllerState(true, touch);
+    assert(hid::IsTouchControllerActive());
+    assert(hid::GetState(0, &state) == ERROR_SUCCESS);
+    assert(state.Gamepad.wButtons == touch.wButtons && state.Gamepad.sThumbLX == touch.sThumbLX);
+    assert(state.Gamepad.sThumbRY == touch.sThumbRY);
+    assert(hid::g_inputDevice == hid::EInputDevice::Xbox);
+    assert(hid::GetState(1, &state) == ERROR_DEVICE_NOT_CONNECTED);
+    XAMINPUT_CAPABILITIES touchCaps{};
+    assert(hid::GetCapabilities(0, &touchCaps) == ERROR_SUCCESS);
+    assert(touchCaps.Type == XAMINPUT_DEVTYPE_GAMEPAD);
+    assert((touchCaps.Gamepad.wButtons & (XAMINPUT_GAMEPAD_BACK | XAMINPUT_GAMEPAD_X | XAMINPUT_GAMEPAD_B)) != 0);
+    XAMINPUT_VIBRATION noRumble{};
+    assert(hid::SetState(0, &noRumble) == ERROR_SUCCESS);
+    hid::SetTouchControllerState(false, touch);
+    assert(hid::GetState(0, &state) == ERROR_DEVICE_NOT_CONNECTED);
+    assert(state.Gamepad.wButtons == 0 && state.Gamepad.sThumbLX == 0);
 
     const int index = AttachController();
     assert(index >= 0);
     SDL_Joystick* joystick = SDL_JoystickOpen(index);
     assert(joystick);
     PumpEvents();
+    assert(hid::HasConnectedController());
+    assert(!hid::IsTouchControllerActive());
     assert(!SDL_HasEvents(SDL_FIRSTEVENT, SDL_LASTEVENT));
     // A connected, idle pad must be visible before the first input event.
     assert(hid::GetState(0, &state) == ERROR_SUCCESS);
     assert(state.Gamepad.wButtons == 0);
+    // A connected, idle hardware pad takes priority over any stale touch snapshot.
+    hid::SetTouchControllerState(true, touch);
+    assert(hid::GetState(0, &state) == ERROR_SUCCESS);
+    assert(state.Gamepad.wButtons == 0 && state.Gamepad.sThumbLX == 0);
+    hid::SetTouchControllerState(false, {});
 
     assert(SDL_JoystickSetVirtualButton(joystick, SDL_CONTROLLER_BUTTON_START, SDL_PRESSED) == 0);
     assert(SDL_JoystickSetVirtualButton(joystick, SDL_CONTROLLER_BUTTON_A, SDL_PRESSED) == 0);
@@ -132,6 +160,7 @@ int main()
     assert(hid::GetState(0, &state) == ERROR_DEVICE_NOT_CONNECTED);
     assert(state.Gamepad.wButtons == 0);
     assert(state.Gamepad.sThumbLX == 0);
+    assert(!hid::HasConnectedController());
     stop = true;
     guest.join();
     SDL_JoystickClose(joystick);
@@ -144,5 +173,37 @@ int main()
     assert(state.Gamepad.sThumbLX == 0);
     assert(SDL_JoystickDetachVirtual(replacement) == 0);
     PumpEvents();
+    assert(!hid::HasConnectedController());
+    const int firstPad = AttachController();
+    const int secondPad = AttachController();
+    assert(firstPad == 0 && secondPad == 1);
+    PumpEvents();
+    assert(SDL_JoystickDetachVirtual(firstPad) == 0);
+    PumpEvents();
+    assert(hid::HasConnectedController());
+    assert(hid::GetState(0, &state) == ERROR_SUCCESS); // The other connected pad becomes active.
+    assert(!hid::IsTouchControllerActive());
+    assert(SDL_JoystickDetachVirtual(0) == 0);
+    PumpEvents();
+    assert(!hid::HasConnectedController());
+    // Touch input returns after unplugging, with no carried-over movement.
+    hid::SetTouchControllerState(true, {});
+    assert(hid::GetState(0, &state) == ERROR_SUCCESS);
+    assert(state.Gamepad.wButtons == 0 && state.Gamepad.sThumbLX == 0);
+    std::atomic<bool> touchDone = false;
+    std::thread touchReader([&] {
+        while (!touchDone)
+        {
+            XAMINPUT_STATE snapshot{};
+            assert(hid::GetState(0, &snapshot) == ERROR_SUCCESS);
+            assert((snapshot.Gamepad.wButtons == 0 && snapshot.Gamepad.sThumbLX == 0) ||
+                (snapshot.Gamepad.wButtons == touch.wButtons && snapshot.Gamepad.sThumbLX == touch.sThumbLX));
+        }
+    });
+    for (int i = 0; i < 2000; ++i)
+        hid::SetTouchControllerState(true, i % 2 ? touch : XAMINPUT_GAMEPAD{});
+    touchDone = true;
+    touchReader.join();
+    hid::SetTouchControllerState(false, {});
     SDL_Quit();
 }

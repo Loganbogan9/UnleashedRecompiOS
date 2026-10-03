@@ -41,6 +41,7 @@ configure_file("{root.as_posix()}/UnleashedRecomp/res/ios/Info.plist.in" "{work.
     assert info['MinimumOSVersion'] == '16.0'
     assert info['CFBundleSupportedPlatforms'] == ['iPhoneOS']
     assert info['LSRequiresIPhoneOS'] and info['UIFileSharingEnabled']
+    assert info['CADisableMinimumFrameDurationOnPhone'] is True
     for key in ('CFBundleVersion', 'CFBundleShortVersionString'):
         assert re.fullmatch(r'[0-9]+(?:\.[0-9]+){0,2}', info[key])
     assert '$' not in (work / 'Info.plist').read_text()

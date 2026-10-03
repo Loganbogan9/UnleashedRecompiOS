@@ -56,6 +56,12 @@ target_include_directories(launch_request_tests PRIVATE "${CMAKE_SOURCE_DIR}/Unl
 target_compile_options(launch_request_tests PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME ios_next_launch_request COMMAND launch_request_tests)
 
+add_executable(touch_gamepad_tests touch_gamepad_tests.cpp)
+target_include_directories(touch_gamepad_tests PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp"
+    "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
+target_compile_options(touch_gamepad_tests PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME ios_touch_gamepad COMMAND touch_gamepad_tests)
+
 set(KERNEL_SYNC_TEST_FLAGS)
 if(UNLEASHED_RECOMP_TEST_SANITIZERS)
     list(APPEND KERNEL_SYNC_TEST_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)

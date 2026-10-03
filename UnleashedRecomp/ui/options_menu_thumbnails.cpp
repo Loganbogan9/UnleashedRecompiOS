@@ -181,6 +181,10 @@ bool TryGetValueThumbnail(const IConfigDef* cfg, VALUE_THUMBNAIL_MAP(T)* thumbna
 
 GuestTexture* GetThumbnail(const IConfigDef* cfg)
 {
+#if defined(UNLEASHED_RECOMP_IOS)
+    if (cfg == &Config::TouchCameraSensitivity)
+        cfg = &Config::HorizontalCamera;
+#endif
     auto findResult = g_configThumbnails.find(cfg);
     if (findResult == g_configThumbnails.end())
     {

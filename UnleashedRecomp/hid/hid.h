@@ -44,6 +44,13 @@ namespace hid
     uint32_t SetState(uint32_t dwUserIndex, XAMINPUT_VIBRATION* pVibration);
     uint32_t GetCapabilities(uint32_t dwUserIndex, XAMINPUT_CAPABILITIES* pCaps);
 
+    bool HasConnectedController();
+#if defined(UNLEASHED_RECOMP_IOS)
+    // UIKit publishes a complete snapshot; guest readers share the SDL joystick lock.
+    void SetTouchControllerState(bool enabled, const XAMINPUT_GAMEPAD& state);
+    bool IsTouchControllerActive();
+#endif
+
     void SetProhibitedInputs(uint16_t wButtons = 0, bool leftStick = false, bool rightStick = false);
     bool IsInputAllowed();
     bool IsInputDeviceController();

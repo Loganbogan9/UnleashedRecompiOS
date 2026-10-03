@@ -140,6 +140,10 @@ Additionally, to support the game's extensive use of asset streaming, parallel t
 
 The game's frame rate cap has been increased by default to 60 FPS, with support for higher targets and unlocked frame rate being available from the options menu. A vast amount of glitches that usually occur at higher frame rates have been fixed and are included as part of the recompilation.
 
+On iOS, set the FPS limit to 120 or unlimited to request 120 Hz on a ProMotion display. The app opts into higher refresh rates and updates its display-link request when the FPS setting changes. Rebuild and reinstall the app to include the ProMotion setting in its `Info.plist`. iOS may still reduce the refresh rate because of Low Power Mode, thermal conditions, or accessibility preferences; see [Apple's ProMotion guidance](https://developer.apple.com/documentation/quartzcore/optimizing-iphone-and-ipad-apps-to-support-promotion-displays).
+
+The iOS video menu uses Resolution Scale to adjust rendering quality. Window resolution, monitor selection, and fullscreen controls are shown only on desktop.
+
 > [!NOTE]
 > While the game is considered to be beatable at frame rates higher than 60 FPS, please note that [some issues](#high-frame-rate-glitches) can still occur. Some of these issues may be addressed in future updates.
 
@@ -364,7 +368,11 @@ Refer to the left column of [this enum template](https://github.com/hedge-dev/Un
 
 ### I can't do anything on iOS, what are the controls?
 
-Currently, there are no touch controls for iOS implemented outside of the installer. If you'd like them, please make an issue if there's not one already and I can probably add some basic ones, but for now I'll be moving on to another project so a controller is REQUIRED.
+Touch controls appear automatically when no game controller is connected. Use the lower-left joystick to move, the X/A/B buttons at the lower right for actions, and Start/Back at the top for their gamepad functions. Drag empty space to move the camera; it stops when your finger stops moving or lifts. You can move, drag the camera, and hold action buttons simultaneously.
+
+Adjust **Touch Camera Sensitivity** under **Options → Input** from 25% to 300% (100% by default). Changes take effect immediately and are saved when you close the options menu; canceling an edit restores the previous sensitivity.
+
+In the options menu, move the left stick left or right to switch categories while no option is being edited, and up or down to select a row. Connecting a controller hides the touch controls; disconnecting it brings them back. Touch input is cleared on controller handoff, interruptions, and layout changes. The installer retains its existing touch interface.
 
 ### Where is the save data and configuration file stored?
 

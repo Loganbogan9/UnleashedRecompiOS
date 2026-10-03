@@ -302,6 +302,19 @@ CONFIG_DEFINE_LOCALE(VerticalCamera)
     { ELanguage::Italian,  { "Telecamera verticale", "Modifica come la telecamera si muove su e giù." } }
 };
 
+#if defined(UNLEASHED_RECOMP_IOS)
+// Japanese Notes: This localization should include furigana.
+CONFIG_DEFINE_LOCALE(TouchCameraSensitivity)
+{
+    { ELanguage::English,  { "Touch Camera Sensitivity", "Adjust the camera speed when dragging the touch screen." } },
+    { ELanguage::Japanese, { "タッチカメラの[感度:かんど]", "[画面:がめん]をドラッグしたときの\u200Bカメラの[速度:そくど]を\u200B[調整:ちょうせい]できます" } },
+    { ELanguage::German,   { "Touch-Kameraempfindlichkeit", "Passe die Kamerageschwindigkeit beim Ziehen auf dem Touchscreen an." } },
+    { ELanguage::French,   { "Sensibilité de la caméra tactile", "Ajuste la vitesse de la caméra en faisant glisser le doigt sur l'écran tactile." } },
+    { ELanguage::Spanish,  { "Sensibilidad de la cámara táctil", "Ajusta la velocidad de la cámara al arrastrar el dedo por la pantalla táctil." } },
+    { ELanguage::Italian,  { "Sensibilità della telecamera touch", "Regola la velocità della telecamera trascinando il dito sullo schermo." } }
+};
+#endif
+
 CONFIG_DEFINE_ENUM_LOCALE(ECameraRotationMode)
 {
     {

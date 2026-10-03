@@ -8,6 +8,9 @@
 #include <gpu/video.h>
 #include <gpu/imgui/imgui_snapshot.h>
 #include <hid/hid.h>
+#if defined(UNLEASHED_RECOMP_IOS)
+#include <hid/touch_gamepad.h>
+#endif
 #include <kernel/heap.h>
 #include <kernel/memory.h>
 #include <locale/locale.h>
@@ -61,6 +64,9 @@ static constexpr float INFO_TEXT_MARQUEE_DELAY = 1.2f;
 
 static constexpr int32_t g_categoryCount = 4;
 static int32_t g_categoryIndex;
+#if defined(UNLEASHED_RECOMP_IOS)
+static int g_touchCategoryAxis;
+#endif
 static ImVec2 g_categoryAnimMin;
 static ImVec2 g_categoryAnimMax;
 
@@ -456,6 +462,16 @@ static bool DrawCategories()
 
     bool moveLeft = !g_lockedOnOption && inputState->GetPadState().IsTapped(SWA::eKeyState_LeftBumper);
     bool moveRight = !g_lockedOnOption && inputState->GetPadState().IsTapped(SWA::eKeyState_RightBumper);
+#if defined(UNLEASHED_RECOMP_IOS)
+    const float touchAxis = hid::IsTouchControllerActive() ? float(inputState->GetPadState().LeftStickHorizontal) : 0;
+    const int direction = touchAxis < -0.5f ? -1 : touchAxis > 0.5f ? 1 : 0;
+    if (!g_lockedOnOption && direction != g_touchCategoryAxis)
+    {
+        moveLeft |= direction < 0;
+        moveRight |= direction > 0;
+    }
+    g_touchCategoryAxis = direction;
+#endif
 
     if (moveLeft)
     {
@@ -851,6 +867,8 @@ static void DrawConfigOption(int32_t rowIndex, float yOffset, ConfigDef<T>* conf
                     {
                         // released lock, restore old value
                         config->Value = s_oldValue;
+                        if (!config->ApplyCallback && config->Callback)
+                            config->Callback(config);
 
                         g_lockedOnOption = false;
 
@@ -1242,6 +1260,10 @@ static void DrawConfigOptions()
         case 1: // INPUT
             DrawConfigOption(rowCount++, yOffset, &Config::HorizontalCamera, true);
             DrawConfigOption(rowCount++, yOffset, &Config::VerticalCamera, true);
+#if defined(UNLEASHED_RECOMP_IOS)
+            DrawConfigOption(rowCount++, yOffset, &Config::TouchCameraSensitivity, true, nullptr,
+                hid::TouchGamepad::MinCameraSensitivity, hid::TouchGamepad::DefaultCameraSensitivity, hid::TouchGamepad::MaxCameraSensitivity);
+#endif
             DrawConfigOption(rowCount++, yOffset, &Config::Vibration, true);
             DrawConfigOption(rowCount++, yOffset, &Config::AllowBackgroundInput, true);
             DrawConfigOption(rowCount++, yOffset, &Config::ControllerIcons, true);
@@ -1258,6 +1280,7 @@ static void DrawConfigOptions()
 
         case 3: // VIDEO
         {
+#if !defined(__APPLE__) || !TARGET_OS_IOS
             DrawConfigOption(rowCount++, yOffset, &Config::WindowSize,
                 !Config::Fullscreen, &Localise("Options_Desc_NotAvailableFullscreen"),
                 0, 0, (int32_t)GameWindow::GetDisplayModes().size() - 1, false);
@@ -1270,10 +1293,13 @@ static void DrawConfigOptions()
                 monitorReason = &Localise("Options_Desc_NotAvailableHardware");
 
             DrawConfigOption(rowCount++, yOffset, &Config::Monitor, canChangeMonitor, monitorReason, 0, 0, displayCount - 1, false);
+#endif
 
             DrawConfigOption(rowCount++, yOffset, &Config::AspectRatio, true);
             DrawConfigOption(rowCount++, yOffset, &Config::ResolutionScale, true, nullptr, 0.25f, 1.0f, 2.0f);
+#if !defined(__APPLE__) || !TARGET_OS_IOS
             DrawConfigOption(rowCount++, yOffset, &Config::Fullscreen, true);
+#endif
             DrawConfigOption(rowCount++, yOffset, &Config::VSync, true);
 #if defined(__APPLE__) && TARGET_OS_IOS
             DrawConfigOption(rowCount++, yOffset, &Config::MetalHUD, true);
@@ -1815,6 +1841,9 @@ void OptionsMenu::Open(bool isPause, SWA::EMenuType pauseMenuType)
     
     g_appearTime = ImGui::GetTime();
     g_categoryIndex = 0;
+#if defined(UNLEASHED_RECOMP_IOS)
+    g_touchCategoryAxis = 0;
+#endif
     g_categoryAnimMin = { 0.0f, 0.0f };
     g_categoryAnimMax = { 0.0f, 0.0f };
     g_selectedItem = nullptr;

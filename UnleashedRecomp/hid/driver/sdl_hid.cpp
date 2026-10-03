@@ -162,6 +162,10 @@ public:
 std::array<Controller, 4> g_controllers;
 Controller* g_activeController;
 static std::atomic<int> g_pendingControllerLED{ -1 };
+#if defined(UNLEASHED_RECOMP_IOS)
+static bool g_touchControllerEnabled;
+static XAMINPUT_GAMEPAD g_touchControllerState{};
+#endif
 
 inline Controller* EnsureController(uint32_t dwUserIndex)
 {
@@ -253,6 +257,10 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
                 auto& connectedController = g_controllers[freeIndex];
                 connectedController.Poll();
                 connectedController.PollAxis();
+#if defined(UNLEASHED_RECOMP_IOS)
+                g_touchControllerEnabled = false;
+                g_touchControllerState = {};
+#endif
                 if (!g_activeController)
                     SetControllerInputDevice(&connectedController);
 
@@ -274,6 +282,17 @@ int HID_OnSDLEvent(void*, SDL_Event* event)
                 if (g_activeController == controller)
                     g_activeController = nullptr;
                 controller->Close();
+                if (!g_activeController)
+                {
+                    for (auto& remaining : g_controllers)
+                    {
+                        if (remaining.CanPoll())
+                        {
+                            SetControllerInputDevice(&remaining);
+                            break;
+                        }
+                    }
+                }
             }
 
             break;
@@ -397,6 +416,38 @@ void hid::Update()
     }
 }
 
+bool hid::HasConnectedController()
+{
+    const JoystickLock lock;
+    for (auto& controller : g_controllers)
+    {
+        if (controller.CanPoll() && SDL_GameControllerGetAttached(controller.controller))
+            return true;
+    }
+    return false;
+}
+
+#if defined(UNLEASHED_RECOMP_IOS)
+void hid::SetTouchControllerState(bool enabled, const XAMINPUT_GAMEPAD& state)
+{
+    const JoystickLock lock;
+    const bool touchInput = state.wButtons || state.sThumbLX || state.sThumbLY || state.sThumbRX || state.sThumbRY;
+    if (enabled && (!g_touchControllerEnabled || touchInput) && !g_activeController)
+    {
+        g_inputDevice = g_inputDeviceController = EInputDevice::Xbox;
+        g_inputDeviceExplicit = EInputDeviceExplicit::Virtual;
+    }
+    g_touchControllerEnabled = enabled;
+    g_touchControllerState = enabled ? state : XAMINPUT_GAMEPAD{};
+}
+
+bool hid::IsTouchControllerActive()
+{
+    const JoystickLock lock;
+    return g_touchControllerEnabled && !g_activeController;
+}
+#endif
+
 uint32_t hid::GetState(uint32_t dwUserIndex, XAMINPUT_STATE* pState)
 {
     const JoystickLock lock;
@@ -410,7 +461,16 @@ uint32_t hid::GetState(uint32_t dwUserIndex, XAMINPUT_STATE* pState)
     pState->dwPacketNumber = packet++;
 
     if (!g_activeController)
+    {
+#if defined(UNLEASHED_RECOMP_IOS)
+        if (g_touchControllerEnabled && dwUserIndex == 0)
+        {
+            pState->Gamepad = g_touchControllerState;
+            return ERROR_SUCCESS;
+        }
+#endif
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     pState->Gamepad = g_activeController->state;
 
@@ -424,7 +484,13 @@ uint32_t hid::SetState(uint32_t dwUserIndex, XAMINPUT_VIBRATION* pVibration)
         return ERROR_BAD_ARGUMENTS;
 
     if (!g_activeController)
+    {
+#if defined(UNLEASHED_RECOMP_IOS)
+        if (g_touchControllerEnabled && dwUserIndex == 0)
+            return ERROR_SUCCESS;
+#endif
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     g_activeController->SetVibration(*pVibration);
 
@@ -438,7 +504,22 @@ uint32_t hid::GetCapabilities(uint32_t dwUserIndex, XAMINPUT_CAPABILITIES* pCaps
         return ERROR_BAD_ARGUMENTS;
 
     if (!g_activeController)
+    {
+#if defined(UNLEASHED_RECOMP_IOS)
+        if (g_touchControllerEnabled && dwUserIndex == 0)
+        {
+            memset(pCaps, 0, sizeof(*pCaps));
+            pCaps->Type = XAMINPUT_DEVTYPE_GAMEPAD;
+            pCaps->SubType = XAMINPUT_DEVSUBTYPE_GAMEPAD;
+            pCaps->Gamepad.wButtons = XAMINPUT_GAMEPAD_START | XAMINPUT_GAMEPAD_BACK
+                | XAMINPUT_GAMEPAD_X | XAMINPUT_GAMEPAD_A | XAMINPUT_GAMEPAD_B;
+            pCaps->Gamepad.sThumbLX = pCaps->Gamepad.sThumbLY = 32767;
+            pCaps->Gamepad.sThumbRX = pCaps->Gamepad.sThumbRY = 32767;
+            return ERROR_SUCCESS;
+        }
+#endif
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     memset(pCaps, 0, sizeof(*pCaps));
 
