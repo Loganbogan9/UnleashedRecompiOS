@@ -1,6 +1,10 @@
 #include "installer.h"
 
 #include <cstring>
+#include <array>
+#include <cstdio>
+#include <memory>
+#include <new>
 #include <xxh3.h>
 
 #include "directory_file_system.h"
@@ -24,6 +28,32 @@
 #include "hashes/spagonia.h"
 #include "hashes/update.h"
 #include <os/logger.h>
+#include <os/macos/ios_diagnostics.h>
+
+static void logInstallerEvent(const char* event, const char* source = "", size_t bytes = 0) noexcept
+{
+    try
+    {
+        char message[512];
+        const int length = std::snprintf(message, sizeof(message), "Installer %s: %s (%zu bytes)", event, source, bytes);
+        if (length > 0)
+            os::logger::Log(std::string_view(message, std::min(size_t(length), sizeof(message) - 1)));
+        os::logger::LogRuntimeDiagnostics(event);
+    }
+    catch (...)
+    {
+        // Diagnostics must not interrupt cleanup when the process is low on memory.
+    }
+}
+
+static bool reportAllocationFailure(Journal& journal) noexcept
+{
+    journal.lastResult = Journal::Result::MemoryAllocationFailed;
+    constexpr char message[] = "Not enough memory to finish installation. Please retry with fewer DLC packs selected.";
+    journal.lastErrorMessage = journal.lastErrorMessage.capacity() >= sizeof(message) - 1 ? message : "Out of memory.";
+    logInstallerEvent("allocation failed", journal.activeFile);
+    return false;
+}
 
 static const std::string GameDirectory = "game";
 static const std::string DLCDirectory = "dlc";
@@ -166,6 +196,13 @@ static bool BuildASTCCacheForTexture(const std::filesystem::path& cacheRoot, std
     if (!bc3 && !bc7)
         return true;
 
+    // Prewarming is optional. Leave large textures to the runtime rather than
+    // allocating an unbounded decoded image alongside the installer UI.
+    constexpr size_t MaxDecodedBytes = 64 * 1024 * 1024;
+    if (descriptor.width == 0 || descriptor.height == 0 ||
+        descriptor.width > MaxDecodedBytes / 4 / descriptor.height)
+        return true;
+
     std::vector<uint8_t> rgba;
     const auto payload = fileData.subspan(descriptor.headerSize);
     bool decoded = false;
@@ -221,128 +258,266 @@ static bool BuildASTCCacheForTexture(const std::filesystem::path& cacheRoot, std
 }
 #endif
 
-static bool copyFile(const FilePair &pair, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::filesystem::path &cacheRoot, bool skipHashChecks, std::vector<uint8_t> &fileData, Journal &journal, const std::function<bool()> &progressCallback) {
+static bool createDirectories(const std::filesystem::path& directory, Journal& journal)
+{
+    // Record only missing directories, and do so before creating anything.
+    // Existing installs must survive cancellation or an allocation failure.
+    for (auto path = directory; !path.empty() && !std::filesystem::exists(path); path = path.parent_path())
+        journal.createdDirectories.insert(path);
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec)
+    {
+        journal.lastResult = Journal::Result::DirectoryCreationFailed;
+        journal.lastErrorMessage = "Unable to create directory at " + fromPath(directory);
+        return false;
+    }
+    return true;
+}
+
+static Journal::FileWrite& prepareFile(const std::filesystem::path& target, Journal& journal)
+{
+    // Use unused siblings so an interrupted previous run or unrelated .tmp/.old
+    // files are never overwritten. Allocate the journal entry before any write.
+    for (size_t index = 0; ; ++index)
+    {
+        auto temporary = target;
+        auto backup = target;
+        const auto suffix = ".installing." + std::to_string(index);
+        temporary += suffix + TempExtension;
+        backup += suffix + OldExtension;
+        if (!std::filesystem::exists(temporary) && !std::filesystem::exists(backup))
+        {
+            journal.fileWrites.push_back({target, std::move(temporary), std::move(backup)});
+            return journal.fileWrites.back();
+        }
+    }
+}
+
+static bool commitFile(Journal::FileWrite& write, Journal& journal)
+{
+    std::error_code ec;
+    if (std::filesystem::exists(write.target))
+    {
+        std::filesystem::rename(write.target, write.backup, ec);
+        if (!ec)
+            write.backedUp = true;
+    }
+    if (!ec)
+    {
+        std::filesystem::rename(write.temporary, write.target, ec);
+        if (!ec)
+            write.installed = true;
+    }
+    if (ec)
+    {
+        journal.lastResult = Journal::Result::FileWriteFailed;
+        journal.lastErrorMessage = "Failed to replace file at " + fromPath(write.target);
+        return false;
+    }
+    return true;
+}
+
+static void finishInstallation(Journal& journal) noexcept
+{
+    std::error_code ec;
+    for (const auto& write : journal.fileWrites)
+    {
+        try
+        {
+            if (write.backedUp)
+                std::filesystem::remove(write.backup, ec);
+        }
+        catch (...)
+        {
+            // A cleanup failure must not roll back a committed installation
+            // after some of its backups have already been removed.
+        }
+    }
+    journal.fileWrites.clear();
+    journal.createdDirectories.clear();
+}
+
+static bool copyFile(const FilePair &pair, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::filesystem::path &cacheRoot, bool skipHashChecks, Journal &journal, const std::function<bool()> &progressCallback)
+{
+    journal.activeFile = pair.first;
     const std::string filename(pair.first);
-    const uint32_t hashCount = pair.second;
     if (!sourceVfs.exists(filename))
     {
         journal.lastResult = Journal::Result::FileMissing;
         journal.lastErrorMessage = fmt::format("File {} does not exist in {}.", filename, sourceVfs.getName());
         return false;
     }
-
-    if (!sourceVfs.load(filename, fileData))
+    const auto targetPath = targetDirectory / std::filesystem::path(std::u8string_view((const char8_t*)pair.first));
+    if (!createDirectories(targetPath.parent_path(), journal))
+        return false;
+    auto& write = prepareFile(targetPath, journal);
+    std::ofstream output(write.temporary, std::ios::binary);
+    if (!output)
     {
-        journal.lastResult = Journal::Result::FileReadFailed;
-        journal.lastErrorMessage = fmt::format("Failed to read file {} from {}.", filename, sourceVfs.getName());
+        journal.lastResult = Journal::Result::FileCreationFailed;
+        journal.lastErrorMessage = "Failed to create file at " + fromPath(targetPath);
         return false;
     }
 
+    std::unique_ptr<XXH3_state_t, decltype(&XXH3_freeState)> hash(nullptr, XXH3_freeState);
     if (!skipHashChecks)
     {
-        uint64_t fileHash = XXH3_64bits(fileData.data(), fileData.size());
-        bool fileHashFound = false;
-        for (uint32_t i = 0; i < hashCount && !fileHashFound; i++)
-        {
-            fileHashFound = fileHash == fileHashes[i];
-        }
+        hash.reset(XXH3_createState());
+        if (!hash)
+            throw std::bad_alloc();
+        XXH3_64bits_reset(hash.get());
+    }
 
-        if (!fileHashFound)
+    size_t copied = 0;
+    bool cancelled = false;
+    const bool read = sourceVfs.stream(filename, [&](std::span<const uint8_t> bytes) {
+        if (!output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()))
+            return false;
+        if (hash)
+            XXH3_64bits_update(hash.get(), bytes.data(), bytes.size());
+        copied += bytes.size();
+        journal.progressCounter += bytes.size();
+        cancelled = !progressCallback();
+        return !cancelled;
+    });
+    output.close();
+    if (cancelled || !read || !output || copied != sourceVfs.getSize(filename))
+    {
+        journal.lastResult = cancelled ? Journal::Result::Cancelled :
+            (!output ? Journal::Result::FileWriteFailed : Journal::Result::FileReadFailed);
+        journal.lastErrorMessage = cancelled ? "Installation was cancelled." :
+            fmt::format("Failed to copy file {} from {}.", filename, sourceVfs.getName());
+        return false;
+    }
+
+    if (hash)
+    {
+        const uint64_t digest = XXH3_64bits_digest(hash.get());
+        if (std::find(fileHashes, fileHashes + pair.second, digest) == fileHashes + pair.second)
         {
             journal.lastResult = Journal::Result::FileHashFailed;
             journal.lastErrorMessage = fmt::format("File {} from {} did not match any of the known hashes.", filename, sourceVfs.getName());
             return false;
         }
     }
-
-#if defined(UNLEASHED_RECOMP_IOS)
-    if (toLower(fromPath(std::filesystem::path(filename).extension())) == ".dds")
-        BuildASTCCacheForTexture(cacheRoot, fileData);
-#endif
-
-    std::filesystem::path targetPath = targetDirectory / std::filesystem::path(std::u8string_view((const char8_t *)(pair.first)));
-    std::filesystem::path parentPath = targetPath.parent_path();
-    if (!std::filesystem::exists(parentPath))
-    {
-        std::error_code ec;
-        std::filesystem::create_directories(parentPath, ec);
-    }
-    
-    while (!parentPath.empty()) {
-        journal.createdDirectories.insert(parentPath);
-
-        if (parentPath != targetDirectory) {
-            parentPath = parentPath.parent_path();
-        }
-        else {
-            parentPath = std::filesystem::path();
-        }
-    }
-
-    std::ofstream outStream(targetPath, std::ios::binary);
-    if (!outStream.is_open())
-    {
-        journal.lastResult = Journal::Result::FileCreationFailed;
-        journal.lastErrorMessage = fmt::format("Failed to create file at {}.", fromPath(targetPath));
-        return false;
-    }
-
-    journal.createdFiles.push_back(targetPath);
-
-    outStream.write((const char *)(fileData.data()), fileData.size());
-    if (outStream.bad())
-    {
-        journal.lastResult = Journal::Result::FileWriteFailed;
-        journal.lastErrorMessage = fmt::format("Failed to create file at {}.", fromPath(targetPath));
-        return false;
-    }
-
-    journal.progressCounter += fileData.size();
-    
+    // Check cancellation for empty files too, before changing the installed file.
     if (!progressCallback())
     {
         journal.lastResult = Journal::Result::Cancelled;
         journal.lastErrorMessage = "Installation was cancelled.";
         return false;
     }
+    if (!commitFile(write, journal))
+        return false;
 
+#if defined(UNLEASHED_RECOMP_IOS)
+    // Cache generation must not make a successfully copied asset fail to install.
+    // Read only modest DDS files, and release their buffers after each texture.
+    constexpr size_t MaxCacheSourceBytes = 32 * 1024 * 1024;
+    try
+    {
+        if (copied <= MaxCacheSourceBytes && toLower(fromPath(targetPath.extension())) == ".dds")
+        {
+            logInstallerEvent("texture cache", filename.c_str(), copied);
+            std::vector<uint8_t> texture(copied);
+            std::ifstream input(targetPath, std::ios::binary);
+            if (input.read(reinterpret_cast<char*>(texture.data()), texture.size()))
+                BuildASTCCacheForTexture(cacheRoot, texture);
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        // The original DDS remains valid; the runtime can decode it on demand.
+        logInstallerEvent("texture cache skipped after allocation failure", filename.c_str(), copied);
+    }
+#else
+    (void)cacheRoot;
+#endif
     return true;
 }
 
 static DLC detectDLC(const std::filesystem::path &sourcePath, VirtualFileSystem &sourceVfs, Journal &journal)
 {
-    std::vector<uint8_t> dlcXmlBytes;
-    if (!sourceVfs.load(DLCValidationFile, dlcXmlBytes))
+    // Only the type is needed during source preparation. Scan with a fixed
+    // window so a large XML cannot allocate its full size on the UI thread.
+    constexpr std::string_view opening = "<Type>";
+    constexpr std::string_view closing = "</Type>";
+    std::array<char, closing.size()> window{};
+    size_t windowSize = 0;
+    size_t typeByteCount = 0;
+    char typeNumber = 0;
+    bool foundOpening = false;
+    bool foundClosing = false;
+    bool foundNull = false;
+    const bool read = sourceVfs.stream(DLCValidationFile, [&](std::span<const uint8_t> bytes) {
+        for (const char byte : bytes)
+        {
+            if (byte == '\0')
+            {
+                foundNull = true;
+                return false;
+            }
+            if (foundOpening)
+            {
+                if (typeByteCount == 0)
+                    typeNumber = byte;
+                ++typeByteCount;
+            }
+            if (windowSize < window.size())
+                window[windowSize++] = byte;
+            else
+            {
+                std::memmove(window.data(), window.data() + 1, window.size() - 1);
+                window.back() = byte;
+            }
+            if (!foundOpening && windowSize >= opening.size() &&
+                std::memcmp(window.data() + windowSize - opening.size(), opening.data(), opening.size()) == 0)
+            {
+                foundOpening = true;
+                windowSize = 0;
+            }
+            else if (foundOpening && windowSize == closing.size() &&
+                std::memcmp(window.data(), closing.data(), closing.size()) == 0)
+            {
+                foundClosing = true;
+                typeByteCount -= closing.size();
+                return false; // Stop as soon as the type has been read.
+            }
+        }
+        return true;
+    });
+    if (!read && !foundClosing && !foundNull)
     {
-        journal.lastResult = Journal::Result::FileMissing;
-        journal.lastErrorMessage = fmt::format("File {} does not exist in {}.", DLCValidationFile, sourceVfs.getName());
+        const std::string sourceName = sourceVfs.getName().empty() ? fromPath(sourcePath.filename()) : sourceVfs.getName();
+        if (sourceVfs.exists(DLCValidationFile))
+        {
+            journal.lastResult = Journal::Result::FileReadFailed;
+            journal.lastErrorMessage = fmt::format("Failed to read file {} from {}.", DLCValidationFile, sourceName);
+        }
+        else
+        {
+            journal.lastResult = Journal::Result::FileMissing;
+            journal.lastErrorMessage = fmt::format("File {} does not exist in {}.", DLCValidationFile, sourceName);
+        }
         return DLC::Unknown;
     }
 
-    const char TypeStartString[] = "<Type>";
-    const char TypeEndString[] = "</Type>";
-    size_t dlcByteCount = dlcXmlBytes.size();
-    dlcXmlBytes.resize(dlcByteCount + 1);
-    dlcXmlBytes[dlcByteCount] = '\0';
-    const char *typeStartLocation = strstr((const char *)(dlcXmlBytes.data()), TypeStartString);
-    const char *typeEndLocation = typeStartLocation != nullptr ? strstr(typeStartLocation, TypeEndString) : nullptr;
-    if (typeStartLocation == nullptr || typeEndLocation == nullptr)
+    if (!foundClosing)
     {
         journal.lastResult = Journal::Result::DLCParsingFailed;
         journal.lastErrorMessage = fmt::format("Failed to find DLC type for {}.", sourceVfs.getName());
         return DLC::Unknown;
     }
 
-    const char *typeNumberLocation = typeStartLocation + strlen(TypeStartString);
-    size_t typeNumberCount = typeEndLocation - typeNumberLocation;
-    if (typeNumberCount != 1)
+    if (typeByteCount != 1)
     {
         journal.lastResult = Journal::Result::UnknownDLCType;
         journal.lastErrorMessage = fmt::format("DLC type for {} is unknown.", sourceVfs.getName());
         return DLC::Unknown;
     }
 
-    switch (*typeNumberLocation)
+    switch (typeNumber)
     {
     case '1':
         return DLC::Spagonia;
@@ -527,19 +702,13 @@ bool Installer::checkFiles(std::span<const FilePair> filePairs, const uint64_t *
 
 bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *fileHashes, VirtualFileSystem &sourceVfs, const std::filesystem::path &targetDirectory, const std::filesystem::path &cacheRoot, const std::string &validationFile, bool skipHashChecks, Journal &journal, const std::function<bool()> &progressCallback)
 {
-    std::error_code ec;
-    if (!std::filesystem::exists(targetDirectory) && !std::filesystem::create_directories(targetDirectory, ec))
-    {
-        journal.lastResult = Journal::Result::DirectoryCreationFailed;
-        journal.lastErrorMessage = "Unable to create directory at " + fromPath(targetDirectory);
+    if (!createDirectories(targetDirectory, journal))
         return false;
-    }
 
     FilePair validationPair = {};
     uint32_t validationHashIndex = 0;
     uint32_t hashIndex = 0;
     uint32_t hashCount = 0;
-    std::vector<uint8_t> fileData;
     for (FilePair pair : filePairs)
     {
         hashIndex = hashCount;
@@ -552,7 +721,7 @@ bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *f
             continue;
         }
 
-        if (!copyFile(pair, &fileHashes[hashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, fileData, journal, progressCallback))
+        if (!copyFile(pair, &fileHashes[hashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, journal, progressCallback))
         {
             return false;
         }
@@ -561,7 +730,7 @@ bool Installer::copyFiles(std::span<const FilePair> filePairs, const uint64_t *f
     // Validation file is copied last after all other files have been copied.
     if (validationPair.first != nullptr)
     {
-        if (!copyFile(validationPair, &fileHashes[validationHashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, fileData, journal, progressCallback))
+        if (!copyFile(validationPair, &fileHashes[validationHashIndex], sourceVfs, targetDirectory, cacheRoot, skipHashChecks, journal, progressCallback))
         {
             return false;
         }
@@ -594,9 +763,12 @@ bool Installer::parseContent(const std::filesystem::path &sourcePath, std::uniqu
 constexpr uint32_t PatcherContribution = 512 * 1024 * 1024;
 
 bool Installer::parseSources(const Input &input, Journal &journal, Sources &sources)
+try
 {
     journal = Journal();
     sources = Sources();
+    journal.lastErrorMessage.reserve(256);
+    logInstallerEvent("source preparation (streamed metadata)");
 
     // Parse the contents of the base game.
     if (!input.gameSource.empty())
@@ -639,6 +811,7 @@ bool Installer::parseSources(const Input &input, Journal &journal, Sources &sour
             return false;
         }
 
+        journal.activeFile = DLCValidationFile.c_str();
         DLC dlc = detectDLC(path, *dlcSource.sourceVfs, journal);
         if (!fillDLCSource(dlc, dlcSource))
         {
@@ -656,20 +829,26 @@ bool Installer::parseSources(const Input &input, Journal &journal, Sources &sour
 
     return true;
 }
+catch (const std::bad_alloc&)
+{
+    sources = Sources();
+    return reportAllocationFailure(journal);
+}
 
 bool Installer::install(const Sources &sources, const std::filesystem::path &targetDirectory, bool skipHashChecks, Journal &journal, std::chrono::seconds endWaitTime, const std::function<bool()> &progressCallback)
+try
 {
+    // Reserve an error message before starting work so allocation failures can
+    // return to the wizard and run rollback without formatting another message.
+    journal.lastErrorMessage.reserve(256);
+    logInstallerEvent("start (bounded reads and transactional writes)");
     // Install files in reverse order of importance. In case of a process crash or power outage, this will increase the likelihood of the installation
     // missing critical files required for the game to run. These files are used as the way to detect if the game is installed.
 
     // Install the DLC.
-    if (!sources.dlc.empty())
-    {
-        journal.createdDirectories.insert(targetDirectory / DLCDirectory);
-    }
-
     for (const DLCSource &dlcSource : sources.dlc)
     {
+        logInstallerEvent("DLC pack", dlcSource.sourceVfs->getName().c_str());
         if (!copyFiles(dlcSource.filePairs, dlcSource.fileHashes, *dlcSource.sourceVfs, targetDirectory / dlcSource.targetSubDirectory, targetDirectory, DLCValidationFile, skipHashChecks, journal, progressCallback))
         {
             return false;
@@ -679,41 +858,39 @@ bool Installer::install(const Sources &sources, const std::filesystem::path &tar
     // If no game or update was specified, we're finished. This means the user was only installing the DLC.
     if ((sources.game == nullptr) && (sources.update == nullptr))
     {
+        finishInstallation(journal);
         return true;
     }
 
     // Install the update.
+    logInstallerEvent("title update");
     if (!copyFiles({ UpdateFiles, UpdateFilesSize }, UpdateHashes, *sources.update, targetDirectory / UpdateDirectory, targetDirectory, UpdateExecutablePatchFile, skipHashChecks, journal, progressCallback))
     {
         return false;
     }
 
     // Install the base game.
+    logInstallerEvent("base game");
     if (!copyFiles({ GameFiles, GameFilesSize }, GameHashes, *sources.game, targetDirectory / GameDirectory, targetDirectory, GameExecutableFile, skipHashChecks, journal, progressCallback))
     {
         return false;
     }
 
     // Create the directory where the patched executable will be stored.
-    std::error_code ec;
     std::filesystem::path patchedDirectory = targetDirectory / PatchedDirectory;
-    if (!std::filesystem::exists(patchedDirectory) && !std::filesystem::create_directories(patchedDirectory, ec))
-    {
-        journal.lastResult = Journal::Result::DirectoryCreationFailed;
-        journal.lastErrorMessage = "Unable to create directory at " + fromPath(patchedDirectory);
+    if (!createDirectories(patchedDirectory, journal))
         return false;
-    }
-
-    journal.createdDirectories.insert(patchedDirectory);
 
     // Patch the executable with the update's file.
     std::filesystem::path baseXexPath = targetDirectory / GameDirectory / GameExecutableFile;
     std::filesystem::path patchPath = targetDirectory / UpdateDirectory / UpdateExecutablePatchFile;
     std::filesystem::path patchedXexPath = patchedDirectory / GameExecutableFile;
-    XexPatcher::Result patcherResult = XexPatcher::apply(baseXexPath, patchPath, patchedXexPath);
+    auto& patchedWrite = prepareFile(patchedXexPath, journal);
+    XexPatcher::Result patcherResult = XexPatcher::apply(baseXexPath, patchPath, patchedWrite.temporary);
     if (patcherResult == XexPatcher::Result::Success)
     {
-        journal.createdFiles.push_back(patchedXexPath);
+        if (!commitFile(patchedWrite, journal))
+            return false;
     }
     else
     {
@@ -742,21 +919,39 @@ bool Installer::install(const Sources &sources, const std::filesystem::path &tar
         }
     }
 
+    finishInstallation(journal);
     return true;
+}
+catch (const std::bad_alloc&)
+{
+    return reportAllocationFailure(journal);
+}
+catch (const std::exception&)
+{
+    journal.lastResult = Journal::Result::UnexpectedError;
+    constexpr char message[] = "An unexpected error occurred during installation. Please check the selected files and available storage.";
+    journal.lastErrorMessage = journal.lastErrorMessage.capacity() >= sizeof(message) - 1 ? message : "Install failed.";
+    return false;
 }
 
 void Installer::rollback(Journal &journal)
 {
     std::error_code ec;
-    for (const auto &path : journal.createdFiles)
+    for (auto it = journal.fileWrites.rbegin(); it != journal.fileWrites.rend(); ++it)
     {
-        std::filesystem::remove(path, ec);
+        if (it->installed)
+            std::filesystem::remove(it->target, ec);
+        if (it->backedUp)
+            std::filesystem::rename(it->backup, it->target, ec);
+        std::filesystem::remove(it->temporary, ec);
     }
 
     for (auto it = journal.createdDirectories.rbegin(); it != journal.createdDirectories.rend(); it++)
     {
         std::filesystem::remove(*it, ec);
     }
+    journal.fileWrites.clear();
+    journal.createdDirectories.clear();
 }
 
 bool Installer::parseGame(const std::filesystem::path &sourcePath)

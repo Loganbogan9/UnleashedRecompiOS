@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -92,7 +93,8 @@ inline void StoreASTCCache(const std::filesystem::path& root, uint64_t hash, uin
 inline bool EncodeRGBA8ToASTC(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
     uint32_t blockWidth, uint32_t blockHeight, std::vector<uint8_t>& outASTC)
 {
-    if (width == 0 || height == 0 || rgba.size() != size_t(width) * height * 4)
+    if (width == 0 || height == 0 || blockWidth == 0 || blockHeight == 0 ||
+        width > rgba.size() / 4 / height || rgba.size() != size_t(width) * height * 4)
         return false;
 
     astcenc_config config{};
@@ -103,6 +105,7 @@ inline bool EncodeRGBA8ToASTC(std::span<const uint8_t> rgba, uint32_t width, uin
     astcenc_context* context = nullptr;
     if (astcenc_context_alloc(&config, 1, &context, nullptr) != ASTCENC_SUCCESS)
         return false;
+    const std::unique_ptr<astcenc_context, decltype(&astcenc_context_free)> encoder(context, astcenc_context_free);
 
     void* imageData = const_cast<uint8_t*>(rgba.data());
     astcenc_image image{width, height, 1, ASTCENC_TYPE_U8, &imageData};
@@ -110,8 +113,7 @@ inline bool EncodeRGBA8ToASTC(std::span<const uint8_t> rgba, uint32_t width, uin
     const size_t blocksX = width / blockWidth + (width % blockWidth != 0);
     const size_t blocksY = height / blockHeight + (height % blockHeight != 0);
     outASTC.resize(blocksX * blocksY * 16);
-    const auto result = astcenc_compress_image(context, &image, &swizzle, outASTC.data(), outASTC.size(), 0);
-    astcenc_context_free(context);
+    const auto result = astcenc_compress_image(encoder.get(), &image, &swizzle, outASTC.data(), outASTC.size(), 0);
     if (result != ASTCENC_SUCCESS)
     {
         outASTC.clear();

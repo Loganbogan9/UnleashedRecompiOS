@@ -1456,9 +1456,12 @@ static void InstallerThread()
     }))
     {
         g_installerFailed = true;
-        g_installerErrorMessage = g_installerJournal.lastErrorMessage;
 
-        // Delete all files that were copied.
+        // Release package metadata before cleanup, especially after low memory.
+        g_installerSources = Installer::Sources();
+        g_installerErrorMessage = std::move(g_installerJournal.lastErrorMessage);
+
+        // Remove new files and restore any previously installed assets.
         Installer::rollback(g_installerJournal);
     }
 
@@ -1467,6 +1470,7 @@ static void InstallerThread()
 }
 
 static void InstallerStart()
+try
 {
     g_currentPage = WizardPage::Installing;
     g_installerStartTime = ImGui::GetTime();
@@ -1477,8 +1481,27 @@ static void InstallerStart()
     g_installerFinished = false;
     g_installerThread = std::make_unique<std::thread>(InstallerThread);
 }
+catch (const std::bad_alloc&)
+{
+    g_installerSources = Installer::Sources();
+    g_installerErrorMessage = "Out of memory.";
+    g_installerFailed = true;
+    g_installerFinished = true;
+    g_installerEndTime = ImGui::GetTime();
+    g_currentPage = WizardPage::InstallFailed;
+}
+catch (const std::system_error&)
+{
+    g_installerSources = Installer::Sources();
+    g_installerErrorMessage = "Start failed.";
+    g_installerFailed = true;
+    g_installerFinished = true;
+    g_installerEndTime = ImGui::GetTime();
+    g_currentPage = WizardPage::InstallFailed;
+}
 
 static bool InstallerParseSources(std::string &errorMessage)
+try
 {
     std::error_code spaceErrorCode;
     std::filesystem::space_info spaceInfo = std::filesystem::space(g_installPath, spaceErrorCode);
@@ -1502,6 +1525,12 @@ static bool InstallerParseSources(std::string &errorMessage)
     bool sourcesParsed = Installer::parseSources(installerInput, g_installerJournal, g_installerSources);
     errorMessage = g_installerJournal.lastErrorMessage;
     return sourcesParsed;
+}
+catch (const std::bad_alloc&)
+{
+    g_installerSources = Installer::Sources();
+    errorMessage = "Out of memory.";
+    return false;
 }
 
 static void DrawNavigationButton()

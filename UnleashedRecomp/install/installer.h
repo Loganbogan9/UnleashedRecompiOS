@@ -34,16 +34,28 @@ struct Journal
         DLCParsingFailed,
         PatchProcessFailed,
         PatchReplacementFailed,
-        UnknownDLCType
+        UnknownDLCType,
+        MemoryAllocationFailed,
+        UnexpectedError
+    };
+
+    struct FileWrite
+    {
+        std::filesystem::path target;
+        std::filesystem::path temporary;
+        std::filesystem::path backup;
+        bool backedUp = false;
+        bool installed = false;
     };
 
     uint64_t progressCounter = 0;
     uint64_t progressTotal = 0;
-    std::list<std::filesystem::path> createdFiles;
+    std::list<FileWrite> fileWrites;
     std::set<std::filesystem::path> createdDirectories;
     Result lastResult = Result::Success;
     XexPatcher::Result lastPatcherResult = XexPatcher::Result::Success;
     std::string lastErrorMessage;
+    const char* activeFile = "";
 };
 
 using FilePair = std::pair<const char *, uint32_t>;

@@ -12,6 +12,7 @@
 #include "iso_file_system.h"
 
 #include <cstring>
+#include <array>
 #include <fstream>
 #include <stack>
 #include <limits>
@@ -52,7 +53,9 @@ ISOFileSystem::ISOFileSystem(const std::filesystem::path &isoPath)
         return;
     }
 
+#if !defined(UNLEASHED_RECOMP_IOS)
     mappedFile.open(isoPath);
+#endif
     const bool usingMappedFile = mappedFile.isOpen();
     if (usingMappedFile)
     {
@@ -272,6 +275,41 @@ bool ISOFileSystem::load(const std::string &path, uint8_t *fileData, size_t file
     {
         return false;
     }
+}
+
+bool ISOFileSystem::stream(const std::string& path, const ChunkSink& sink) const
+{
+    const auto it = fileMap.find(path);
+    if (it == fileMap.end())
+        return false;
+    const auto [offset, length] = it->second;
+    if (offset > sourceSize || length > sourceSize - offset)
+        return false;
+    if (mappedFile.isOpen())
+    {
+        for (size_t copied = 0; copied < length;)
+        {
+            const size_t count = std::min(StreamChunkSize, length - copied);
+            if (!sink({mappedFile.data() + offset + copied, count}))
+                return false;
+            copied += count;
+        }
+        return true;
+    }
+    std::ifstream input(sourcePath, std::ios::binary);
+    if (!input || offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()))
+        return false;
+    input.seekg(static_cast<std::streamoff>(offset));
+    std::array<uint8_t, StreamChunkSize> buffer;
+    size_t remaining = length;
+    while (remaining != 0)
+    {
+        const size_t count = std::min(buffer.size(), remaining);
+        if (!input.read(reinterpret_cast<char*>(buffer.data()), count) || !sink(std::span(buffer).first(count)))
+            return false;
+        remaining -= count;
+    }
+    return true;
 }
 
 size_t ISOFileSystem::getSize(const std::string &path) const

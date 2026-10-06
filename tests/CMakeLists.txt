@@ -122,6 +122,50 @@ function(add_controller_input_tests)
 endfunction()
 add_controller_input_tests()
 
+if(UNIX)
+    # Rename only the mapping call in this test's production utility, allowing
+    # deterministic mapping failures on both Linux and macOS.
+    add_library(installer_test_mapped_file OBJECT
+        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils/memory_mapped_file.cpp")
+    target_compile_definitions(installer_test_mapped_file PRIVATE mmap=InstallerTestMmap)
+    add_executable(installer_file_systems
+        portable/installer_file_systems.cpp
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/iso_file_system.cpp"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/xcontent_file_system.cpp")
+    target_include_directories(installer_file_systems PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp"
+        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
+    target_compile_options(installer_file_systems PRIVATE -fno-strict-aliasing -Wall -Wextra -UNDEBUG)
+    target_link_libraries(installer_file_systems PRIVATE installer_test_mapped_file Threads::Threads)
+    add_test(NAME installer_file_system_bounds COMMAND installer_file_systems)
+
+    add_executable(installer_ios_file_systems
+        portable/installer_file_systems.cpp
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/iso_file_system.cpp"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/xcontent_file_system.cpp")
+    target_include_directories(installer_ios_file_systems PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp"
+        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
+    target_compile_definitions(installer_ios_file_systems PRIVATE UNLEASHED_RECOMP_IOS)
+    target_compile_options(installer_ios_file_systems PRIVATE -fno-strict-aliasing -Wall -Wextra -UNDEBUG)
+    target_link_libraries(installer_ios_file_systems PRIVATE installer_test_mapped_file Threads::Threads)
+    add_test(NAME installer_ios_bounded_sources COMMAND installer_ios_file_systems)
+
+    add_executable(installer_streaming
+        portable/installer_streaming.cpp
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/installer.cpp"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/iso_file_system.cpp"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/xcontent_file_system.cpp"
+        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils/memory_mapped_file.cpp")
+    target_include_directories(installer_streaming PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/portable/installer_stubs"
+        "${CMAKE_SOURCE_DIR}/UnleashedRecomp" "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils"
+        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/thirdparty/xxHash"
+        "${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/fmt/include")
+    target_compile_definitions(installer_streaming PRIVATE FMT_HEADER_ONLY)
+    target_compile_options(installer_streaming PRIVATE -fno-strict-aliasing -Wall -Wextra -UNDEBUG
+        -include "${CMAKE_CURRENT_SOURCE_DIR}/portable/installer_stubs/stdafx.h")
+    target_link_libraries(installer_streaming PRIVATE Threads::Threads)
+    add_test(NAME installer_streaming_and_rollback COMMAND installer_streaming)
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(test_o1heap STATIC "${CMAKE_SOURCE_DIR}/thirdparty/o1heap/o1heap.c")
     target_include_directories(test_o1heap PUBLIC "${CMAKE_SOURCE_DIR}/thirdparty/o1heap")
@@ -134,16 +178,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(runtime_memory_heap PRIVATE -fno-strict-aliasing -Wall -Wextra -Wno-unused-parameter -UNDEBUG)
     target_link_libraries(runtime_memory_heap PRIVATE test_o1heap)
     add_test(NAME runtime_memory_heap COMMAND runtime_memory_heap)
-    add_executable(installer_file_systems
-        portable/installer_file_systems.cpp
-        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/iso_file_system.cpp"
-        "${CMAKE_SOURCE_DIR}/UnleashedRecomp/install/xcontent_file_system.cpp"
-        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils/memory_mapped_file.cpp")
-    target_include_directories(installer_file_systems PRIVATE "${CMAKE_SOURCE_DIR}/UnleashedRecomp"
-        "${CMAKE_SOURCE_DIR}/tools/XenonRecomp/XenonUtils")
-    target_compile_options(installer_file_systems PRIVATE -fno-strict-aliasing -Wall -Wextra -UNDEBUG)
-    target_link_options(installer_file_systems PRIVATE -Wl,--wrap=mmap)
-    add_test(NAME installer_file_system_bounds COMMAND installer_file_systems)
     add_executable(guest_file_io
         portable/guest_file_io.cpp
         "${CMAKE_SOURCE_DIR}/UnleashedRecomp/kernel/io/file_system.cpp"

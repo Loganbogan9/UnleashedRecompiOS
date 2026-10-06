@@ -61,8 +61,11 @@ static void SafeLogPrint(const std::string_view str, const char* func)
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_logStart).count();
-    s_logFile.Write(func ? fmt::format("[{:9.3f}s] [{}] {}\n", elapsed, func, str)
-                        : fmt::format("[{:9.3f}s] {}\n", elapsed, str));
+    char prefix[256];
+    const int length = func ? std::snprintf(prefix, sizeof(prefix), "[%9.3fs] [%s] ", elapsed, func)
+                            : std::snprintf(prefix, sizeof(prefix), "[%9.3fs] ", elapsed);
+    const size_t prefixSize = length > 0 ? std::min(size_t(length), sizeof(prefix) - 1) : 0;
+    s_logFile.Write({std::string_view(prefix, prefixSize), str, "\n"});
 #endif
 }
 

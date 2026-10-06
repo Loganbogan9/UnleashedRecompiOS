@@ -1,27 +1,36 @@
 #include <install/iso_file_system.h>
 #include <install/xcontent_file_system.h>
+#include <install/directory_file_system.h>
 #include <array>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <thread>
 #include <unistd.h>
 
 #define CHECK(condition) do { if (!(condition)) { std::cerr << __FILE__ << ':' << __LINE__ << ": " << #condition << '\n'; std::abort(); } } while (false)
 
-// Force the ISO's stream fallback without relying on host memory pressure.
-// Only this regression target is linked with --wrap=mmap.
+// Force stream fallbacks without relying on host memory pressure.
+// Only this target's memory_mapped_file.cpp calls InstallerTestMmap.
 static bool failFileMapping = false;
-extern "C" void* __real_mmap(void*, size_t, int, int, int, off_t);
-extern "C" void* __wrap_mmap(void* address, size_t length, int protection, int flags, int fd, off_t offset)
+static size_t mappingsRemaining = std::numeric_limits<size_t>::max();
+static size_t mappingsRefused = 0;
+static size_t mappingsAttempted = 0;
+extern "C" void* InstallerTestMmap(void* address, size_t length, int protection, int flags, int fd, off_t offset)
 {
-    if (failFileMapping)
+    ++mappingsAttempted;
+    if (failFileMapping || mappingsRemaining == 0)
     {
+        ++mappingsRefused;
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    return __real_mmap(address, length, protection, flags, fd, offset);
+    if (mappingsRemaining != std::numeric_limits<size_t>::max())
+        --mappingsRemaining;
+    return mmap(address, length, protection, flags, fd, offset);
 }
 
 static void putLE(std::vector<uint8_t>& bytes, size_t offset, uint64_t value, size_t count)
@@ -104,6 +113,125 @@ static void checkFile(VirtualFileSystem& fs)
     CHECK(!fs.load("default.xex", out.data(), 4));
     CHECK(!fs.load("default.xex", nullptr, 5));
     CHECK(!fs.load("missing", out.data(), out.size()));
+    size_t streamed = 0;
+    CHECK(fs.stream("default.xex", [&](std::span<const uint8_t> bytes) {
+        CHECK(bytes.size() <= VirtualFileSystem::StreamChunkSize);
+        CHECK(streamed <= 5 && bytes.size() <= 5 - streamed);
+        CHECK(std::memcmp(bytes.data(), &"Sonic"[streamed], bytes.size()) == 0);
+        streamed += bytes.size();
+        return true;
+    }));
+    CHECK(streamed == 5);
+    int calls = 0;
+    CHECK(!fs.stream("default.xex", [&](std::span<const uint8_t>) { ++calls; return false; }));
+    CHECK(calls == 1);
+    CHECK(!fs.stream("missing", [](std::span<const uint8_t>) { CHECK(false); return true; }));
+}
+
+static void checkDLCBatch(const std::filesystem::path& directory)
+{
+    const auto gamePath = directory / "batch.iso";
+    const auto updatePath = directory / "update.live";
+    write(gamePath, isoImage());
+    write(updatePath, contentHeader(false));
+    std::array<std::string, 6> xml;
+    std::array<std::filesystem::path, 6> paths;
+    const char types[] = {'1', '2', '3', '4', '5', '7'};
+    for (size_t i = 0; i < paths.size(); ++i)
+    {
+        xml[i] = std::string("<DLC><Type>") + types[i] + "</Type></DLC>";
+        paths[i] = directory / ("DLC-" + std::to_string(i) + ".live");
+        auto bytes = contentHeader(false);
+        std::memset(bytes.data() + 0x2000, 0, 40);
+        std::memcpy(bytes.data() + 0x2000, "DLC.xml", 7);
+        bytes[0x2028] = 7;
+        putBE(bytes, 0x2034, xml[i].size(), 4);
+        std::memcpy(bytes.data() + 0x3000, xml[i].data(), xml[i].size());
+        write(paths[i], bytes);
+    }
+
+    // Hold the game, update and all six DLC simultaneously. Rotate the order
+    // so each pack is the one that exceeds the simulated mapping budget.
+    for (size_t start = 0; start < paths.size(); ++start)
+    {
+        mappingsRemaining = 7; // Game, update, and five DLC fit; the sixth cannot map.
+        const auto refusedBefore = mappingsRefused;
+        auto game = ISOFileSystem::create(gamePath);
+        auto update = XContentFileSystem::create(updatePath);
+        CHECK(game && update);
+        std::array<std::unique_ptr<XContentFileSystem>, 6> packs;
+        for (size_t offset = 0; offset < paths.size(); ++offset)
+        {
+            const size_t index = (start + offset) % paths.size();
+            packs[index] = XContentFileSystem::create(paths[index]);
+            CHECK(packs[index] != nullptr);
+        }
+#if defined(UNLEASHED_RECOMP_IOS)
+        CHECK(mappingsRefused == refusedBefore);
+#else
+        CHECK(mappingsRefused == refusedBefore + 1);
+#endif
+        for (size_t i = 0; i < packs.size(); ++i)
+        {
+            std::vector<uint8_t> data;
+            CHECK(static_cast<VirtualFileSystem&>(*packs[i]).load("DLC.xml", data));
+            CHECK(std::string(data.begin(), data.end()) == xml[i]);
+            CHECK(packs[i]->getName() == paths[i].filename().string());
+        }
+        checkFile(*game);
+        checkFile(*update);
+    }
+    mappingsRemaining = std::numeric_limits<size_t>::max();
+}
+
+static void checkFragmentedSTFS(const std::filesystem::path& path)
+{
+    std::vector<uint8_t> payload(9000);
+    for (size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<uint8_t>(i * 17 + i / 4096);
+    auto bytes = contentHeader(false);
+    bytes.resize(0x7000);
+    putLE(bytes, 0x202C, 3, 3);
+    putBE(bytes, 0x2034, payload.size(), 4);
+    putBE(bytes, 0x102C, 4, 4); // Data chain: blocks 1 -> 4 -> 2.
+    putBE(bytes, 0x1074, 2, 4);
+    putBE(bytes, 0x1044, 0xFFFFFF, 4);
+    std::memcpy(bytes.data() + 0x3000, payload.data(), 4096);
+    std::memcpy(bytes.data() + 0x6000, payload.data() + 4096, 4096);
+    std::memcpy(bytes.data() + 0x4000, payload.data() + 8192, payload.size() - 8192);
+    for (bool streamed : {false, true})
+    {
+        write(path, bytes);
+        failFileMapping = streamed;
+        auto fs = XContentFileSystem::create(path);
+        CHECK(fs != nullptr);
+        auto read = [&] {
+            for (int i = 0; i < 10; ++i)
+            {
+                std::vector<uint8_t> actual(payload.size());
+                CHECK(fs->load("default.xex", actual.data(), actual.size()));
+                CHECK(actual == payload);
+                actual.clear();
+                CHECK(fs->stream("default.xex", [&](std::span<const uint8_t> chunk) {
+                    CHECK(chunk.size() <= VirtualFileSystem::StreamChunkSize);
+                    actual.insert(actual.end(), chunk.begin(), chunk.end());
+                    return true;
+                }));
+                CHECK(actual == payload);
+            }
+        };
+        std::thread otherReader(read);
+        read();
+        otherReader.join();
+        if (streamed)
+        {
+            std::filesystem::resize_file(path, 0x4010);
+            std::vector<uint8_t> actual(payload.size());
+            CHECK(!fs->load("default.xex", actual.data(), actual.size()));
+            CHECK(!fs->stream("default.xex", [](std::span<const uint8_t>) { return true; }));
+        }
+    }
+    failFileMapping = false;
 }
 
 int main()
@@ -111,6 +239,21 @@ int main()
     std::string temporary = (std::filesystem::temp_directory_path() / "unleashed-installer-XXXXXX").string();
     CHECK(mkdtemp(temporary.data()) != nullptr);
     const std::filesystem::path directory(temporary);
+    {
+        std::vector<uint8_t> payload(VirtualFileSystem::StreamChunkSize * 3 + 7, 0xA5);
+        write(directory / "large.bin", payload);
+        DirectoryFileSystem fs(directory);
+        std::vector<uint8_t> actual;
+        CHECK(fs.stream("large.bin", [&](std::span<const uint8_t> bytes) {
+            CHECK(bytes.size() <= VirtualFileSystem::StreamChunkSize);
+            actual.insert(actual.end(), bytes.begin(), bytes.end());
+            return true;
+        }));
+        CHECK(actual == payload);
+        int calls = 0;
+        CHECK(!fs.stream("large.bin", [&](std::span<const uint8_t>) { ++calls; return false; }));
+        CHECK(calls == 1);
+    }
     const auto isoPath = directory / "game.iso";
     const auto packagePath = directory / "game.live";
     const auto dataDirectory = std::filesystem::path(packagePath.string() + ".data");
@@ -127,6 +270,7 @@ int main()
         std::filesystem::resize_file(isoPath, 34 * 2048 + 2);
         uint8_t out[5]{};
         CHECK(!fs.load("default.xex", out, sizeof(out)));
+        CHECK(!fs.stream("default.xex", [](std::span<const uint8_t>) { return true; }));
     }
     failFileMapping = false;
     write(isoPath, iso);
@@ -151,6 +295,20 @@ int main()
     auto stfs = contentHeader(false);
     write(packagePath, stfs);
     { XContentFileSystem fs(packagePath); CHECK(!fs.empty()); checkFile(fs); }
+    failFileMapping = true;
+    {
+        auto fs = XContentFileSystem::create(packagePath);
+        CHECK(fs != nullptr);
+        CHECK(fs->getName() == packagePath.filename().string());
+        checkFile(*fs);
+    }
+    failFileMapping = false;
+    checkDLCBatch(directory);
+    checkFragmentedSTFS(directory / "fragmented.live");
+    CHECK(XContentFileSystem::create(directory / "missing.live") == nullptr);
+    const auto emptyPath = directory / "empty.live";
+    write(emptyPath, {});
+    CHECK(XContentFileSystem::create(emptyPath) == nullptr);
     stfs[0x2028] = 41; // length exceeds 40-byte name field
     write(packagePath, stfs);
     CHECK(XContentFileSystem::create(packagePath) == nullptr);
@@ -178,6 +336,18 @@ int main()
     auto svod = svodImage();
     write(dataPath, svod);
     { XContentFileSystem fs(packagePath); CHECK(!fs.empty()); checkFile(fs); }
+    failFileMapping = true;
+    {
+        auto fs = XContentFileSystem::create(packagePath);
+        CHECK(fs != nullptr);
+        checkFile(*fs);
+        std::filesystem::resize_file(dataPath, 0x3802);
+        uint8_t out[5]{};
+        CHECK(!fs->load("default.xex", out, sizeof(out)));
+        CHECK(!fs->stream("default.xex", [](std::span<const uint8_t>) { return true; }));
+    }
+    failFileMapping = false;
+    write(dataPath, svod);
     directoryEntry(svod, 0x3000, 0, 32, "loop", 0x10);
     write(dataPath, svod);
     CHECK(XContentFileSystem::create(packagePath) == nullptr);
@@ -199,5 +369,8 @@ int main()
     write(dataPath, svod);
     CHECK(XContentFileSystem::create(packagePath) == nullptr);
     std::filesystem::remove_all(directory);
+#if defined(UNLEASHED_RECOMP_IOS)
+    CHECK(mappingsAttempted == 0);
+#endif
     std::cout << "Production ISO/STFS/SVOD parser regressions passed\n";
 }

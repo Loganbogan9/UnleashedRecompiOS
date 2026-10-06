@@ -17,7 +17,7 @@
 
 #include "virtual_file_system.h"
 
-#include <memory_mapped_file.h>
+#include "source_file.h"
 
 enum class XContentVolumeType
 {
@@ -47,13 +47,14 @@ struct XContentFileSystem : VirtualFileSystem
     size_t svodStartDataBlock = 0;
     size_t svodBaseOffset = 0;
     size_t svodMagicOffset = 0;
-    std::vector<MemoryMappedFile> mappedFiles;
+    std::vector<SourceFile> sourceFiles;
     uint64_t baseOffset = 0;
     std::map<std::string, File> fileMap;
     std::string name;
 
     XContentFileSystem(const std::filesystem::path &contentPath);
     bool load(const std::string &path, uint8_t *fileData, size_t fileDataMaxByteCount) const override;
+    bool stream(const std::string& path, const ChunkSink& sink) const override;
     size_t getSize(const std::string &path) const override;
     bool exists(const std::string &path) const override;
     const std::string &getName() const override;
