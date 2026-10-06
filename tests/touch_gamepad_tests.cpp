@@ -107,22 +107,38 @@ int main()
         allButtons |= button.mask;
         assert((pad.State().wButtons & allButtons) == allButtons);
     }
+    assert((allButtons & (XAMINPUT_GAMEPAD_LEFT_SHOULDER | XAMINPUT_GAMEPAD_RIGHT_SHOULDER)) ==
+        (XAMINPUT_GAMEPAD_LEFT_SHOULDER | XAMINPUT_GAMEPAD_RIGHT_SHOULDER));
     // Buttons, movement and a camera drag can all be held independently.
     const hid::TouchPoint center{426, 180};
-    pad.Begin(6, center);
-    pad.Move(6, {center.x + 4, center.y + 2});
+    const uint64_t cameraFinger = finger;
+    pad.Begin(cameraFinger, center);
+    pad.Move(cameraFinger, {center.x + 4, center.y + 2});
     pad.Tick(1.0 / 120);
     assert(pad.State().sThumbRX > 0 && pad.State().sThumbRY < 0);
     assert(pad.State().wButtons == allButtons && pad.State().sThumbLX > 0);
     pad.Tick(1.0 / 120);
     assert(pad.State().sThumbRX == 0 && pad.State().sThumbRY == 0); // Holding still stops the camera.
-    pad.Move(6, {center.x + 6, center.y + 2});
-    pad.End(6);
+    pad.Move(cameraFinger, {center.x + 6, center.y + 2});
+    pad.End(cameraFinger);
     pad.Tick(1.0 / 60);
     assert(pad.State().sThumbRX == 0);
     pad.End(0);
     assert(pad.State().sThumbLX == 0 && pad.State().sThumbLY == 0);
     assert(pad.State().wButtons == allButtons);
+    pad.Clear();
+
+    // Quick-step bumpers release independently while movement and X stay held.
+    pad.Begin(0, stick);
+    pad.Move(0, {stick.x + 10, stick.y});
+    pad.Begin(1, Button(pad, XAMINPUT_GAMEPAD_X).area.center);
+    pad.Begin(2, Button(pad, XAMINPUT_GAMEPAD_LEFT_SHOULDER).area.center);
+    pad.Begin(3, Button(pad, XAMINPUT_GAMEPAD_RIGHT_SHOULDER).area.center);
+    assert(pad.State().wButtons == (XAMINPUT_GAMEPAD_X | XAMINPUT_GAMEPAD_LEFT_SHOULDER | XAMINPUT_GAMEPAD_RIGHT_SHOULDER));
+    pad.End(2);
+    assert(pad.State().wButtons == (XAMINPUT_GAMEPAD_X | XAMINPUT_GAMEPAD_RIGHT_SHOULDER));
+    pad.End(3);
+    assert(pad.State().wButtons == XAMINPUT_GAMEPAD_X && pad.State().sThumbLX > 0);
     pad.Clear();
 
     const auto a = Button(pad, XAMINPUT_GAMEPAD_A).area;

@@ -368,7 +368,7 @@ Refer to the left column of [this enum template](https://github.com/hedge-dev/Un
 
 ### I can't do anything on iOS, what are the controls?
 
-Touch controls appear automatically when no game controller is connected. Use the lower-left joystick to move, the X/A/B buttons at the lower right for actions, and Start/Back at the top for their gamepad functions. Drag empty space to move the camera; it stops when your finger stops moving or lifts. You can move, drag the camera, and hold action buttons simultaneously.
+Touch controls appear automatically when no game controller is connected. Use the lower-left joystick to move, the X/A/B buttons at the lower right for actions, and Start/Back at the top for their gamepad functions. LB and RB sit above the joystick and action buttons and provide the left and right bumpers for quick steps. Drag empty space to move the camera; it stops when your finger stops moving or lifts. You can move, drag the camera, and hold action buttons simultaneously.
 
 Adjust **Touch Camera Sensitivity** under **Options → Input** from 25% to 300% (100% by default). Changes take effect immediately and are saved when you close the options menu; canceling an edit restores the previous sensitivity.
 

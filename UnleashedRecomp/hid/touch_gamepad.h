@@ -36,7 +36,7 @@ namespace hid
             size_t button{};
         };
         std::array<Contact, 16> contacts{};
-        std::array<TouchButton, 5> buttons{};
+        std::array<TouchButton, 7> buttons{};
         TouchArea stick{};
         float scale = 1, stickTravel = 44;
         float cameraSensitivity = DefaultCameraSensitivity;
@@ -129,6 +129,8 @@ namespace hid
             buttons = {{
                 {{{middleX - 42 * scale, top + 28 * scale}, 68 * scale, 36 * scale, false}, XAMINPUT_GAMEPAD_BACK, "Back"},
                 {{{middleX + 42 * scale, top + 28 * scale}, 68 * scale, 36 * scale, false}, XAMINPUT_GAMEPAD_START, "Start"},
+                {{{left + 76 * scale, maxY - 214 * scale}, 84 * scale, 44 * scale, false}, XAMINPUT_GAMEPAD_LEFT_SHOULDER, "LB"},
+                {{{maxX - 80 * scale, maxY - 214 * scale}, 84 * scale, 44 * scale, false}, XAMINPUT_GAMEPAD_RIGHT_SHOULDER, "RB"},
                 {{{maxX - 118 * scale, maxY - 150 * scale}, 60 * scale, 60 * scale, true}, XAMINPUT_GAMEPAD_X, "X"},
                 {{{maxX - 80 * scale, maxY - 72 * scale}, 60 * scale, 60 * scale, true}, XAMINPUT_GAMEPAD_A, "A"},
                 {{{maxX - 42 * scale, maxY - 150 * scale}, 60 * scale, 60 * scale, true}, XAMINPUT_GAMEPAD_B, "B"}
